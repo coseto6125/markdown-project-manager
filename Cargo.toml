@@ -1,0 +1,28 @@
+[package]
+name = "markdown-project-manager"
+version = "0.1.0"
+edition = "2021"
+description = "mpm — structured CRUD + graph queries over markdown project logs (follow-ups), so an agent gets exactly what it needs without reading the whole file"
+license = "MIT"
+repository = "https://github.com/coseto6125/markdown-project-manager"
+readme = "README.md"
+keywords = ["markdown", "cli", "project-management", "follow-ups", "graph"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "mpm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+etoon = { version = "0.4", default-features = false }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
