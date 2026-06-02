@@ -1,4 +1,5 @@
 name: Release
+# 5-platform binary release; dispatch with dry_run=true to build-only.
 
 on:
   push:
