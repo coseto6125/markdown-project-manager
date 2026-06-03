@@ -90,19 +90,21 @@ fn emit_entries(store: &Store, mut candidates: Vec<usize>, json: bool) -> Result
     Ok(())
 }
 
-/// Find an entry index by id, erroring if absent or ambiguous.
+/// Find an entry index by id, erroring if absent or ambiguous. The mutation path
+/// has no prebuilt index, so this scans — but tracks (first match, count) instead
+/// of collecting every match into a Vec just to detect duplicates.
 fn find(store: &Store, id: &str) -> Result<usize> {
-    let matches: Vec<usize> = store
-        .entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.id == id)
-        .map(|(i, _)| i)
-        .collect();
-    match matches.as_slice() {
-        [i] => Ok(*i),
-        [] => bail!("no entry with id {id}"),
-        many => bail!("ambiguous id {id}: {} entries share it", many.len()),
+    let (mut first, mut count) = (None, 0usize);
+    for (i, e) in store.entries.iter().enumerate() {
+        if e.id == id {
+            first.get_or_insert(i);
+            count += 1;
+        }
+    }
+    match (first, count) {
+        (Some(i), 1) => Ok(i),
+        (None, _) => bail!("no entry with id {id}"),
+        (_, n) => bail!("ambiguous id {id}: {n} entries share it"),
     }
 }
 

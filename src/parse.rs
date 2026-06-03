@@ -363,16 +363,19 @@ fn derive_edges(entry: &mut Entry) {
     if let Some(target) = find_fu_after(&entry.provenance, "carried over from ") {
         entry.edges.push(Edge::CarriedOverFrom(target));
     }
-    // `[[FU-id]]` wikilinks anywhere in the body.
-    for (_, val) in field_values(entry) {
-        for target in wikilinks(&val) {
-            if !entry
-                .edges
-                .iter()
-                .any(|e| matches!(e, Edge::LinksTo(t) if *t == target))
-            {
-                entry.edges.push(Edge::LinksTo(target));
-            }
+    // `[[FU-id]]` wikilinks anywhere in the body. Collect targets first (borrowing
+    // field values, no clone), then push — releasing the borrow before mutating edges.
+    let link_targets: Vec<String> = field_values(entry)
+        .into_iter()
+        .flat_map(wikilinks)
+        .collect();
+    for target in link_targets {
+        if !entry
+            .edges
+            .iter()
+            .any(|e| matches!(e, Edge::LinksTo(t) if *t == target))
+        {
+            entry.edges.push(Edge::LinksTo(target));
         }
     }
     // `blocked: FU-…` mentions in next-action keep the entry in Open.
@@ -421,15 +424,16 @@ fn set_status_from_resolution(entry: &mut Entry) {
     }
 }
 
-fn field_values(entry: &Entry) -> Vec<(String, String)> {
+/// Borrowed body values (core slots + extras), for scanning — no clone.
+fn field_values(entry: &Entry) -> Vec<&str> {
     let mut out = Vec::new();
     for k in CORE_KEYS {
         if let Some(Some(v)) = entry.core.slot(k) {
-            out.push((k.to_string(), v.clone()));
+            out.push(v.as_str());
         }
     }
-    for (k, v) in &entry.extra {
-        out.push((k.clone(), v.clone()));
+    for (_, v) in &entry.extra {
+        out.push(v.as_str());
     }
     out
 }
