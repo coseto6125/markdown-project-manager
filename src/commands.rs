@@ -68,6 +68,9 @@ pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
             println!("{}", next_id(&store));
             Ok(())
         }
+        // Intercepted in main() before Paths resolution (install targets agent
+        // hosts, not a follow-ups log).
+        Command::Install { .. } => unreachable!("Install is handled in main"),
     }
 }
 

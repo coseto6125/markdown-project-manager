@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod commands;
 pub mod index;
+pub mod install;
 pub mod model;
 pub mod output;
 pub mod parse;
