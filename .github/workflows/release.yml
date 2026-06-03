@@ -115,11 +115,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Stage installers (pin default version to this tag)
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed "s/MPM_VERSION=\"\${MPM_VERSION:-latest}\"/MPM_VERSION=\"\${MPM_VERSION:-$version}\"/" install.sh > dist/install.sh
+          sed "s/if (\$env:MPM_VERSION) { \$env:MPM_VERSION } else { 'latest' }/if (\$env:MPM_VERSION) { \$env:MPM_VERSION } else { '$version' }/" install.ps1 > dist/install.ps1
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -128,20 +137,29 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
+            dist/install.sh
+            dist/install.ps1
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
             ## Install
 
-            ### From git tag (source build)
+            One-line install (anonymous GitHub download, no account/token):
+
+            **Linux / macOS**
+            ```
+            curl -sSfL https://github.com/coseto6125/markdown-project-manager/releases/download/${{ github.ref_name }}/install.sh | sh
+            ```
+
+            **Windows PowerShell**
+            ```
+            irm https://github.com/coseto6125/markdown-project-manager/releases/download/${{ github.ref_name }}/install.ps1 | iex
+            ```
+
+            **From source (any platform, needs Rust)**
             ```
             cargo install --git https://github.com/coseto6125/markdown-project-manager --tag ${{ github.ref_name }} --bin mpm --locked
             ```
 
-            ### Manual download
-            Pick a `.tar.gz` / `.zip` matching your platform from Assets below.
-            Each has a `.sha256` for integrity. Build provenance:
-            ```
-            gh attestation verify ./mpm --owner coseto6125
-            ```
+            Or pick a `.tar.gz` / `.zip` matching your platform from Assets below; each has a `.sha256` for integrity.

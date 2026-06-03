@@ -29,6 +29,28 @@ mpm stub FU-2026-05-23-042           # 那一行 resolution stub
 
 ## 安裝
 
+一鍵安裝會抓對應平台的預編譯執行檔（Linux/macOS 的 x86_64、aarch64，Windows x86_64），
+驗 SHA256 後放到使用者目錄；沒有對應 prebuilt 時自動 fallback 到 `cargo install`。
+**全程使用 GitHub Release 的匿名公開下載，無需任何帳號或 token。**
+
+**Linux / macOS**
+
+```
+curl -sSfL https://github.com/coseto6125/markdown-project-manager/releases/latest/download/install.sh | sh
+```
+
+**Windows PowerShell**
+
+```
+irm https://github.com/coseto6125/markdown-project-manager/releases/latest/download/install.ps1 | iex
+```
+
+腳本變數：`MPM_VERSION`（釘版本）、`MPM_INSTALL_DIR`（安裝目錄）、`MPM_NO_VERIFY=1`、`MPM_FORCE_CARGO=1`。
+
+> 首次發佈前、或想跳過 Release 短連結，可直接從原始碼分支執行安裝腳本：
+> `curl -sSfL https://raw.githubusercontent.com/coseto6125/markdown-project-manager/main/install.sh | sh`
+> （Windows：`irm https://raw.githubusercontent.com/coseto6125/markdown-project-manager/main/install.ps1 | iex`）
+
 **從原始碼（任何平台，需 Rust toolchain）**
 
 ```
@@ -37,15 +59,8 @@ cargo install --git https://github.com/coseto6125/markdown-project-manager --bin
 
 釘特定版本：在後面加 `--tag v0.1.0`。
 
-**預編譯執行檔（Linux x86_64/arm64 · macOS x86_64/arm64 · Windows x86_64）**
-
-到 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 下載對應平台的
-`.tar.gz` / `.zip`，解出 `mpm`（Windows 為 `mpm.exe`）放到 `PATH` 上的目錄。每個壓縮檔都附
-`.sha256` 可驗完整性，並帶 SLSA build provenance：
-
-```
-gh attestation verify ./mpm --owner coseto6125
-```
+**手動下載**：到 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 取對應平台的
+`.tar.gz` / `.zip`，解出 `mpm`（Windows 為 `mpm.exe`）放到 `PATH` 上的目錄；每個壓縮檔都附 `.sha256` 可驗完整性。
 
 ## 使用方式
 
