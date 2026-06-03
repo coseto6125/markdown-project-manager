@@ -1,2 +1,4 @@
 /target
 .followups.cache
+# The repo dogfoods its own follow-ups protocol; the log is local-only.
+/.claude/
