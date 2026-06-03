@@ -45,7 +45,10 @@ pub fn replace_ids_in_text(s: &str, map: &HashMap<&str, &str>) -> (String, usize
     let mut count = 0;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'F' && s[i..].starts_with("FU-") {
+        // Require a word boundary before `FU-` so `MYFU-001` is not mistaken for
+        // the id `FU-001` (no look-behind would corrupt the preceding word).
+        let prev_is_ident = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'-');
+        if !prev_is_ident && bytes[i] == b'F' && s[i..].starts_with("FU-") {
             // Consume the id token: FU- followed by [A-Za-z0-9-].
             let start = i;
             let mut j = i + 3;
@@ -135,6 +138,7 @@ pub fn apply(store: &mut Store, renames: &[Rename]) -> usize {
             res.raw = raw;
             refs += n;
             refs += bump(&mut res.note, &map);
+            refs += bump(&mut res.wontfix_reason, &map);
         }
     }
 
@@ -186,6 +190,44 @@ mod tests {
         let (out, n) = replace_ids_in_text("延後：FU-1 之類的", &m);
         assert_eq!(out, "延後：FU-X 之類的");
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn does_not_match_fu_inside_a_larger_word() {
+        // `MYFU-001` is not a reference to `FU-001`; a missing look-behind would
+        // corrupt it into `MYFU-NEW`.
+        let m = map(&[("FU-001", "FU-NEW")]);
+        let (out, n) = replace_ids_in_text("MYFU-001 and x-FU-001", &m);
+        assert_eq!(out, "MYFU-001 and x-FU-001");
+        assert_eq!(n, 0);
+        // But a real boundary (space/start/punct that isn't ident) still matches.
+        let (out2, n2) = replace_ids_in_text("(FU-001)", &m);
+        assert_eq!(out2, "(FU-NEW)");
+        assert_eq!(n2, 1);
+    }
+
+    #[test]
+    fn rewrites_id_inside_wontfix_reason() {
+        let mut store = Store::default();
+        let mut e = entry("FU-A");
+        e.resolution = Some(Resolution::wontfix("overlaps with FU-B, skip".into()));
+        store.entries.push(e);
+        store.entries.push(entry("FU-B"));
+        let renames = vec![
+            Rename {
+                old: "FU-A".into(),
+                new: "FU-2026-06-03-1111".into(),
+            },
+            Rename {
+                old: "FU-B".into(),
+                new: "FU-2026-06-03-2222".into(),
+            },
+        ];
+        apply(&mut store, &renames);
+        assert_eq!(
+            store.entries[0].resolution.as_ref().unwrap().wontfix_reason.as_deref(),
+            Some("overlaps with FU-2026-06-03-2222, skip")
+        );
     }
 
     #[test]

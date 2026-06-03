@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
     match cmd {
         Command::Add {
+            id,
             category,
             scope,
             why,
@@ -21,7 +22,7 @@ pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
             size,
             owner,
             surfaced,
-        } => add(paths, category, scope, why, next, size, owner, surfaced),
+        } => add(paths, id, category, scope, why, next, size, owner, surfaced),
         Command::Show { id, json } => show(paths, &id, json),
         Command::Stub { id } => stub(paths, &id),
         Command::List {
@@ -131,13 +132,14 @@ fn first_missing<'a>(store: &Store, ids: &[&'a str]) -> Option<&'a str> {
 }
 
 fn migrate_ids(paths: &Paths, commit: bool) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let renames = crate::migrate::build_mapping(&store, now_nanos());
-    if renames.is_empty() {
-        println!("no entries to migrate");
-        return Ok(());
-    }
     if !commit {
+        // Preview against the WAL-replayed store so pending ops are reflected.
+        let store = crate::wal::read(paths)?;
+        let renames = crate::migrate::build_mapping(&store, now_nanos());
+        if renames.is_empty() {
+            println!("no entries to migrate");
+            return Ok(());
+        }
         println!(
             "DRY RUN — {} entries would be re-minted (pass --commit to write):",
             renames.len()
@@ -150,10 +152,21 @@ fn migrate_ids(paths: &Paths, commit: bool) -> Result<()> {
         println!("{refs} textual reference(s) would be rewritten across edges + free text");
         return Ok(());
     }
-    let refs = crate::migrate::apply(&mut store, &renames);
-    store::save(paths, &mut store)?;
-    println!("migrated {} entries, rewrote {} references", renames.len(), refs);
-    Ok(())
+    // Hold the commit lock for the whole rewrite so it can't race a group commit's
+    // save (which would clobber the migrated markdown). with_commit_lock drains
+    // pending WAL ops into markdown first, so load() sees committed state.
+    crate::wal::with_commit_lock(paths, || {
+        let mut store = store::load(paths)?;
+        let renames = crate::migrate::build_mapping(&store, now_nanos());
+        if renames.is_empty() {
+            println!("no entries to migrate");
+            return Ok(());
+        }
+        let refs = crate::migrate::apply(&mut store, &renames);
+        store::save(paths, &mut store)?;
+        println!("migrated {} entries, rewrote {} references", renames.len(), refs);
+        Ok(())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,6 +181,12 @@ pub fn apply_add(
     owner: Option<String>,
     surfaced: Option<String>,
 ) -> Result<String> {
+    // Idempotent under at-least-once WAL replay: if a crash between save and the
+    // rotated-batch removal causes this Add to replay twice, the second one is a
+    // no-op instead of a duplicate entry (which would make `show` ambiguous).
+    if store.entries.iter().any(|e| e.id == id) {
+        return Ok(id);
+    }
     let provenance = surfaced.map(|s| format!("surfaced in {s}")).unwrap_or_default();
 
     let mut entry = Entry {
@@ -203,6 +222,7 @@ pub fn apply_add(
 #[allow(clippy::too_many_arguments)]
 fn add(
     paths: &Paths,
+    id: Option<String>,
     category: String,
     scope: String,
     why: Option<String>,
@@ -211,7 +231,7 @@ fn add(
     owner: Option<String>,
     surfaced: Option<String>,
 ) -> Result<()> {
-    let id = crate::id::mint(now_nanos());
+    let id = id.unwrap_or_else(|| crate::id::mint(now_nanos()));
     crate::wal::submit(
         paths,
         crate::wal::Op::Add {
@@ -687,8 +707,8 @@ fn query(paths: &Paths, filters: &[String], json: bool) -> Result<()> {
 }
 
 fn render_cmd(paths: &Paths, check: bool) -> Result<()> {
-    let mut store = store::load(paths)?;
     if check {
+        let store = store::load(paths)?;
         let (open_now, done_now) = render::render(&store);
         let open_disk = std::fs::read_to_string(&paths.open_md).unwrap_or_default();
         let done_disk = std::fs::read_to_string(&paths.done_md).unwrap_or_default();
@@ -700,9 +720,14 @@ fn render_cmd(paths: &Paths, check: bool) -> Result<()> {
             std::process::exit(1);
         }
     } else {
-        store::save(paths, &mut store)?;
-        println!("rendered");
-        Ok(())
+        // Re-render under the commit lock (drains pending WAL first) so it can't
+        // race a group commit's save.
+        crate::wal::with_commit_lock(paths, || {
+            let mut store = store::load(paths)?;
+            store::save(paths, &mut store)?;
+            println!("rendered");
+            Ok(())
+        })
     }
 }
 

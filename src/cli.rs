@@ -24,6 +24,9 @@ pub struct Cli {
 pub enum Command {
     /// Mint a new follow-up; prints its id.
     Add {
+        /// Use this id instead of minting one (e.g. an id reserved via `next-id`).
+        #[arg(long)]
+        id: Option<String>,
         #[arg(long)]
         category: String,
         #[arg(long)]
