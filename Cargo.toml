@@ -1,6 +1,6 @@
 [package]
 name = "markdown-project-manager"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "mpm — structured CRUD + graph queries over markdown project logs (follow-ups), so an agent gets exactly what it needs without reading the whole file"
 license = "MIT"
