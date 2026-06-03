@@ -75,7 +75,7 @@ impl Index {
                 }
                 None => self.dangling.push((src, id.clone())),
             },
-            Edge::Supersedes(_) | Edge::DoneInBranch { .. } | Edge::Wontfix { .. } => {}
+            Edge::DoneInBranch { .. } | Edge::Wontfix { .. } => {}
         }
     }
 }

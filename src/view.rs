@@ -97,7 +97,7 @@ fn edges_json(entry: &Entry) -> Map<String, Value> {
             Edge::CarriedOverFrom(t) => carried_from = Some(t.clone()),
             Edge::DoneInPr { pr, .. } => done_pr = Some(*pr),
             Edge::SurfacedInPr(pr) => surfaced_pr = Some(*pr),
-            Edge::DoneInBranch { .. } | Edge::Wontfix { .. } | Edge::Supersedes(_) => {}
+            Edge::DoneInBranch { .. } | Edge::Wontfix { .. } => {}
         }
     }
     if !blocked_on.is_empty() {

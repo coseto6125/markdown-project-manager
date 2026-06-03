@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump on any breaking change to the cached structs; a mismatch forces a
 /// transparent re-import from the markdown.
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 
 /// The six known core fields. Everything else lands in [`Entry::extra`].
 /// Spelling here is the canonical render spelling; aliases (e.g. `original-scope`
@@ -64,31 +64,36 @@ pub struct CoreFields {
     pub links: Option<String>,
 }
 
-impl CoreFields {
-    /// Map a canonical core key to its slot. Returns `None` for non-core keys.
-    pub fn slot_mut(&mut self, canon_key: &str) -> Option<&mut Option<String>> {
-        match canon_key {
-            "owner" => Some(&mut self.owner),
-            "scope" => Some(&mut self.scope),
-            "why-deferred" => Some(&mut self.why_deferred),
-            "next-action" => Some(&mut self.next_action),
-            "size" => Some(&mut self.size),
-            "links" => Some(&mut self.links),
-            _ => None,
-        }
-    }
+/// Generate the `slot`/`slot_mut` accessor pair from one key→field list, so the
+/// canonical-key → struct-field mapping lives in a single place.
+macro_rules! core_slots {
+    ($($key:literal => $field:ident),+ $(,)?) => {
+        impl CoreFields {
+            /// Map a canonical core key to its slot. Returns `None` for non-core keys.
+            pub fn slot_mut(&mut self, canon_key: &str) -> Option<&mut Option<String>> {
+                match canon_key {
+                    $($key => Some(&mut self.$field),)+
+                    _ => None,
+                }
+            }
 
-    pub fn slot(&self, canon_key: &str) -> Option<&Option<String>> {
-        match canon_key {
-            "owner" => Some(&self.owner),
-            "scope" => Some(&self.scope),
-            "why-deferred" => Some(&self.why_deferred),
-            "next-action" => Some(&self.next_action),
-            "size" => Some(&self.size),
-            "links" => Some(&self.links),
-            _ => None,
+            pub fn slot(&self, canon_key: &str) -> Option<&Option<String>> {
+                match canon_key {
+                    $($key => Some(&self.$field),)+
+                    _ => None,
+                }
+            }
         }
-    }
+    };
+}
+
+core_slots! {
+    "owner" => owner,
+    "scope" => scope,
+    "why-deferred" => why_deferred,
+    "next-action" => next_action,
+    "size" => size,
+    "links" => links,
 }
 
 /// Drives render order while preserving the exact key spelling seen on import.
@@ -138,7 +143,6 @@ pub enum Edge {
     Wontfix { reason: String },
     BlockedOn(String),
     SupersededBy(String),
-    Supersedes(String),
     LinksTo(String),
     CarriedOverFrom(String),
     SurfacedInPr(u32),
@@ -178,7 +182,6 @@ pub struct Resolution {
     /// `superseded by FU-…` target, when kind is Superseded.
     pub superseded_by: Option<String>,
     pub wontfix_reason: Option<String>,
-    pub date: Option<String>,
 }
 
 impl Resolution {
@@ -188,6 +191,29 @@ impl Resolution {
             ResKind::Done => "✅",
             ResKind::Wontfix => "🚫",
             ResKind::Superseded => "",
+        }
+    }
+
+    /// The rendered resolution text: `<marker><sep><raw>`. Shared by the stub and
+    /// the DONE heading suffix so the marker/separator convention lives in one place.
+    pub fn rendered(&self) -> String {
+        let marker = self.marker();
+        let sep = if marker.is_empty() { "" } else { " " };
+        format!("{marker}{sep}{}", self.raw)
+    }
+
+    /// A resolution with all structured fields empty; callers fill the few that
+    /// apply. Keeps the constructors free of repeated `None` literals.
+    pub(crate) fn of(kind: ResKind, raw: String) -> Self {
+        Resolution {
+            kind,
+            raw,
+            pr: None,
+            commit: None,
+            branch: None,
+            note: None,
+            superseded_by: None,
+            wontfix_reason: None,
         }
     }
 
@@ -202,15 +228,10 @@ impl Resolution {
             raw.push_str(&format!(" — {n}"));
         }
         Resolution {
-            kind: ResKind::Done,
-            raw,
             pr: Some(pr),
             commit,
-            branch: None,
             note,
-            superseded_by: None,
-            wontfix_reason: None,
-            date: None,
+            ..Resolution::of(ResKind::Done, raw)
         }
     }
 
@@ -223,43 +244,24 @@ impl Resolution {
             raw.push_str(&format!(" — {n}"));
         }
         Resolution {
-            kind: ResKind::Done,
-            raw,
-            pr: None,
             commit,
             branch: Some(branch),
             note,
-            superseded_by: None,
-            wontfix_reason: None,
-            date: None,
+            ..Resolution::of(ResKind::Done, raw)
         }
     }
 
     pub fn wontfix(reason: String) -> Self {
         Resolution {
-            kind: ResKind::Wontfix,
-            raw: format!("wontfix: {reason}"),
-            pr: None,
-            commit: None,
-            branch: None,
-            note: None,
-            superseded_by: None,
-            wontfix_reason: Some(reason),
-            date: None,
+            wontfix_reason: Some(reason.clone()),
+            ..Resolution::of(ResKind::Wontfix, format!("wontfix: {reason}"))
         }
     }
 
     pub fn superseded(target: String) -> Self {
         Resolution {
-            kind: ResKind::Superseded,
-            raw: format!("superseded by {target}"),
-            pr: None,
-            commit: None,
-            branch: None,
-            note: None,
-            superseded_by: Some(target),
-            wontfix_reason: None,
-            date: None,
+            superseded_by: Some(target.clone()),
+            ..Resolution::of(ResKind::Superseded, format!("superseded by {target}"))
         }
     }
 }
@@ -281,8 +283,6 @@ impl Entry {
     /// from the verbatim `raw` resolution text so every phrasing round-trips.
     pub fn stub(&self) -> Option<String> {
         let r = self.resolution.as_ref()?;
-        let marker = r.marker();
-        let sep = if marker.is_empty() { "" } else { " " };
-        Some(format!("<!-- {} → {marker}{sep}{} -->", self.id, r.raw))
+        Some(format!("<!-- {} → {} -->", self.id, r.rendered()))
     }
 }
