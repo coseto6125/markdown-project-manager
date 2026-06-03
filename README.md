@@ -62,6 +62,23 @@ cargo install --git https://github.com/coseto6125/markdown-project-manager --bin
 **手動下載**：到 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 取對應平台的
 `.tar.gz` / `.zip`，解出 `mpm`（Windows 為 `mpm.exe`）放到 `PATH` 上的目錄；每個壓縮檔都附 `.sha256` 可驗完整性。
 
+### 裝進 AI coding agent
+
+`mpm install` 把 mpm 的 skill（教 agent 何時／如何呼叫 `mpm`）交給 coding agent，
+讓它自動在「開 PR 前查 log、過程中記 defer、完成後標 done」三個時機用 `mpm`。
+skill 內容在編譯時內嵌進 binary，**任何平台、無需 checkout 或網路**。
+
+```
+mpm install claude     # 裝進 Claude Code  → ~/.claude/skills/mpm/
+mpm install codex      # 裝進 Codex CLI    → $CODEX_HOME（預設 ~/.codex）/skills/mpm/
+mpm install gemini     # 裝進 Gemini CLI   → 寫檔後 gemini skills link
+mpm install            # 沒有原生 skill 機制的 agent：把 skill 寫成檔案並印出路徑
+```
+
+`mpm install`（不帶 host）會把 skill 寫到暫存檔（`<temp>/mpm-skill/SKILL.md`）並印出路徑，
+讓任何其他 agent 自己讀那個檔，**決定要原樣複製還是改寫成它自己的 skill 格式**。
+路徑解析在 Windows 自動用 `%USERPROFILE%`；Gemini 沒裝 `gemini` CLI 時保留檔案並提示手動連結指令。
+
 ## 使用方式
 
 `mpm` 像 git 找 `.git` 一樣，**從目前目錄往上找最近的 `.claude/FOLLOWUPS.md`**，

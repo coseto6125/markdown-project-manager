@@ -9,7 +9,6 @@ use crate::output::{emit, Format};
 use crate::store::{self, Paths};
 use crate::{render, view};
 use anyhow::{bail, Result};
-use chrono::Local;
 use serde_json::{json, Value};
 
 pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
@@ -64,10 +63,15 @@ pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
         Command::Import { dry_run } => import_cmd(paths, dry_run),
         Command::Validate { json } => validate(paths, json),
         Command::NextId => {
-            let store = store::load(paths)?;
-            println!("{}", next_id(&store));
+            // Hash ids carry no "next" sequence: mint one now (the entry it would
+            // belong to is created later by `add`, which mints its own).
+            println!("{}", crate::id::mint(now_nanos()));
             Ok(())
         }
+        Command::MigrateIds { commit } => migrate_ids(paths, commit),
+        // Intercepted in main() before Paths resolution (install targets agent
+        // hosts, not a follow-ups log).
+        Command::Install { .. } => unreachable!("Install is handled in main"),
     }
 }
 
@@ -91,23 +95,71 @@ fn find(store: &Store, id: &str) -> Result<usize> {
     }
 }
 
-/// Mint `FU-<today>-<NNN>` using the next free daily sequence.
-fn next_id(store: &Store) -> String {
-    let today = Local::now().format("%Y-%m-%d").to_string();
-    let prefix = format!("FU-{today}-");
-    let max = store
-        .entries
-        .iter()
-        .filter_map(|e| e.id.strip_prefix(&prefix))
-        .filter_map(|s| s.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
-    format!("{prefix}{:03}", max + 1)
+/// Nanoseconds since the unix epoch — the entropy source for id minting.
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Confirm every id resolves against the store INCLUDING pending WAL ops, so a
+/// target another agent only just `add`ed (still in its WAL) is accepted — that
+/// is the only "concurrent false-absence" case. If a miss remains, drain the WAL
+/// and re-check once to close the append-vs-check microwindow; a miss after that
+/// is a genuine typo and is reported. Returns the (post-replay) store so callers
+/// avoid a second load.
+fn ensure_resolvable(paths: &Paths, ids: &[&str]) -> Result<Store> {
+    let store = crate::wal::read(paths)?;
+    if let Some(missing) = first_missing(&store, ids) {
+        // Drain pending commits and re-read once before declaring it absent.
+        let _ = crate::wal::try_group_commit(paths);
+        let store = crate::wal::read(paths)?;
+        if let Some(missing) = first_missing(&store, ids) {
+            bail!("no entry with id {missing}");
+        }
+        let _ = missing;
+        return Ok(store);
+    }
+    Ok(store)
+}
+
+fn first_missing<'a>(store: &Store, ids: &[&'a str]) -> Option<&'a str> {
+    ids.iter()
+        .copied()
+        .find(|id| !store.entries.iter().any(|e| e.id == *id))
+}
+
+fn migrate_ids(paths: &Paths, commit: bool) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let renames = crate::migrate::build_mapping(&store, now_nanos());
+    if renames.is_empty() {
+        println!("no entries to migrate");
+        return Ok(());
+    }
+    if !commit {
+        println!(
+            "DRY RUN — {} entries would be re-minted (pass --commit to write):",
+            renames.len()
+        );
+        for r in &renames {
+            println!("  {} → {}", r.old, r.new);
+        }
+        let mut preview = store.clone();
+        let refs = crate::migrate::apply(&mut preview, &renames);
+        println!("{refs} textual reference(s) would be rewritten across edges + free text");
+        return Ok(());
+    }
+    let refs = crate::migrate::apply(&mut store, &renames);
+    store::save(paths, &mut store)?;
+    println!("migrated {} entries, rewrote {} references", renames.len(), refs);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add(
-    paths: &Paths,
+pub fn apply_add(
+    store: &mut Store,
+    id: String,
     category: String,
     scope: String,
     why: Option<String>,
@@ -115,9 +167,7 @@ fn add(
     size: Option<String>,
     owner: Option<String>,
     surfaced: Option<String>,
-) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let id = next_id(&store);
+) -> Result<String> {
     let provenance = surfaced.map(|s| format!("surfaced in {s}")).unwrap_or_default();
 
     let mut entry = Entry {
@@ -147,20 +197,47 @@ fn add(
     }
     rebuild_edges(&mut entry);
     store.entries.push(entry);
-    store::save(paths, &mut store)?;
+    Ok(id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add(
+    paths: &Paths,
+    category: String,
+    scope: String,
+    why: Option<String>,
+    next: Option<String>,
+    size: Option<String>,
+    owner: Option<String>,
+    surfaced: Option<String>,
+) -> Result<()> {
+    let id = crate::id::mint(now_nanos());
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Add {
+            id: id.clone(),
+            category,
+            scope,
+            why,
+            next,
+            size,
+            owner,
+            surfaced,
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
 fn show(paths: &Paths, id: &str, json: bool) -> Result<()> {
-    let store = store::load(paths)?;
+    let store = crate::wal::read(paths)?;
     let i = find(&store, id)?;
     println!("{}", emit(&view::entry_json(&store.entries[i], true), fmt(json))?);
     Ok(())
 }
 
 fn stub(paths: &Paths, id: &str) -> Result<()> {
-    let store = store::load(paths)?;
+    let store = crate::wal::read(paths)?;
     let i = find(&store, id)?;
     match store.entries[i].stub() {
         Some(s) => println!("{s}"),
@@ -179,7 +256,7 @@ fn list(
     pr: Option<u32>,
     json: bool,
 ) -> Result<()> {
-    let store = store::load(paths)?;
+    let store = crate::wal::read(paths)?;
     let idx = Index::build(&store);
 
     let mut candidates: Vec<usize> = (0..store.entries.len()).collect();
@@ -214,12 +291,24 @@ fn list(
     Ok(())
 }
 
-fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_set(store: &mut Store, id: &str, field: &str, value: String, append: bool) -> Result<String> {
+    let i = find(store, id)?;
     apply_field(&mut store.entries[i], field, value, append);
     rebuild_edges(&mut store.entries[i]);
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Result<()> {
+    ensure_resolvable(paths, &[id])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Set {
+            id: id.to_string(),
+            field: field.to_string(),
+            value,
+            append,
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
@@ -258,25 +347,34 @@ fn merge(existing: Option<String>, value: String, append: bool) -> String {
     }
 }
 
-fn move_category(paths: &Paths, id: &str, category: String) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_move_category(store: &mut Store, id: &str, category: String) -> Result<String> {
+    let i = find(store, id)?;
     store.entries[i].category = category;
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn move_category(paths: &Paths, id: &str, category: String) -> Result<()> {
+    ensure_resolvable(paths, &[id])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Move {
+            id: id.to_string(),
+            category,
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
-fn done(
-    paths: &Paths,
+pub fn apply_done(
+    store: &mut Store,
     id: &str,
     pr: Option<u32>,
     branch: Option<String>,
     commit: Option<String>,
     note: Option<String>,
-) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+) -> Result<String> {
+    let i = find(store, id)?;
     let resolution = match (pr, branch) {
         (Some(pr), _) => Resolution::done_pr(pr, commit, note),
         (None, Some(b)) => Resolution::done_branch(b, commit, note),
@@ -289,41 +387,84 @@ fn done(
     // Drop blocked-on edges; the entry is resolved.
     e.edges.retain(|edge| !matches!(edge, Edge::BlockedOn(_)));
     rebuild_edges(e);
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn done(
+    paths: &Paths,
+    id: &str,
+    pr: Option<u32>,
+    branch: Option<String>,
+    commit: Option<String>,
+    note: Option<String>,
+) -> Result<()> {
+    if pr.is_none() && branch.is_none() {
+        bail!("done requires --pr or --branch");
+    }
+    ensure_resolvable(paths, &[id])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Done {
+            id: id.to_string(),
+            pr,
+            branch,
+            commit,
+            note,
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
-fn wontfix(paths: &Paths, id: &str, reason: String) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_wontfix(store: &mut Store, id: &str, reason: String) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.resolution = Some(Resolution::wontfix(reason));
     e.status = Status::Wontfix;
     e.location = Location::Done;
     rebuild_edges(e);
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn wontfix(paths: &Paths, id: &str, reason: String) -> Result<()> {
+    ensure_resolvable(paths, &[id])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Wontfix {
+            id: id.to_string(),
+            reason,
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
-fn supersede(paths: &Paths, id: &str, by: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    find(&store, by)?; // target must exist
-    let i = find(&store, id)?;
+pub fn apply_supersede(store: &mut Store, id: &str, by: &str) -> Result<String> {
+    find(store, by)?; // target must exist
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.resolution = Some(Resolution::superseded(by.to_string()));
     e.status = Status::Superseded;
     e.location = Location::Done;
     rebuild_edges(e);
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn supersede(paths: &Paths, id: &str, by: &str) -> Result<()> {
+    ensure_resolvable(paths, &[id, by])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Supersede {
+            id: id.to_string(),
+            by: by.to_string(),
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
-fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_block(store: &mut Store, id: &str, on: &str) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     if !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(t) if t == on)) {
         e.edges.push(Edge::BlockedOn(on.to_string()));
@@ -331,14 +472,24 @@ fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
     if e.status == Status::Open {
         e.status = Status::Blocked;
     }
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
+    ensure_resolvable(paths, &[id, on])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Block {
+            id: id.to_string(),
+            on: on.to_string(),
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
-fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.edges.retain(|edge| match (edge, on) {
         (Edge::BlockedOn(t), Some(target)) => t != target,
@@ -348,39 +499,64 @@ fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
     if e.status == Status::Blocked && !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(_))) {
         e.status = Status::Open;
     }
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
+    ensure_resolvable(paths, &[id])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Unblock {
+            id: id.to_string(),
+            on: on.map(str::to_string),
+        },
+    )?;
     println!("{id}");
     Ok(())
 }
 
-fn reopen(paths: &Paths, id: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_reopen(store: &mut Store, id: &str) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.resolution = None;
     e.status = Status::Open;
     e.location = Location::Open;
     rebuild_edges(e);
-    store::save(paths, &mut store)?;
+    Ok(id.to_string())
+}
+
+fn reopen(paths: &Paths, id: &str) -> Result<()> {
+    ensure_resolvable(paths, &[id])?;
+    crate::wal::submit(paths, crate::wal::Op::Reopen { id: id.to_string() })?;
     println!("{id}");
     Ok(())
 }
 
-fn link(paths: &Paths, from: &str, to: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    find(&store, to)?;
-    let i = find(&store, from)?;
+pub fn apply_link(store: &mut Store, from: &str, to: &str) -> Result<String> {
+    find(store, to)?;
+    let i = find(store, from)?;
     let e = &mut store.entries[i];
     if !e.edges.iter().any(|edge| matches!(edge, Edge::LinksTo(t) if t == to)) {
         e.edges.push(Edge::LinksTo(to.to_string()));
     }
-    store::save(paths, &mut store)?;
+    Ok(from.to_string())
+}
+
+fn link(paths: &Paths, from: &str, to: &str) -> Result<()> {
+    ensure_resolvable(paths, &[from, to])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Link {
+            from: from.to_string(),
+            to: to.to_string(),
+        },
+    )?;
     println!("{from}");
     Ok(())
 }
 
 fn graph(paths: &Paths, id: &str, direction: &str, depth: usize, json: bool) -> Result<()> {
-    let store = store::load(paths)?;
+    let store = crate::wal::read(paths)?;
     let idx = Index::build(&store);
     let start = find(&store, id)?;
 
@@ -452,7 +628,7 @@ fn collect(
 }
 
 fn query(paths: &Paths, filters: &[String], json: bool) -> Result<()> {
-    let store = store::load(paths)?;
+    let store = crate::wal::read(paths)?;
     let idx = Index::build(&store);
     let mut candidates: Vec<usize> = (0..store.entries.len()).collect();
 
@@ -548,7 +724,7 @@ fn import_cmd(paths: &Paths, dry_run: bool) -> Result<()> {
 }
 
 fn validate(paths: &Paths, json: bool) -> Result<()> {
-    let store = store::load(paths)?;
+    let store = crate::wal::read(paths)?;
     let idx = Index::build(&store);
 
     let dangling: Vec<Value> = idx

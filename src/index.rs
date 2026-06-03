@@ -37,39 +37,40 @@ impl Index {
                 .push(i);
 
             for edge in &e.edges {
-                idx.add_edge(store, i, edge);
+                idx.add_edge(i, edge);
             }
         }
         idx
     }
 
-    fn add_edge(&mut self, store: &Store, src: usize, edge: &Edge) {
-        let resolve = |id: &str| store.entries.iter().position(|e| e.id == id);
+    /// Resolve an edge target id via `by_id` (filled in the first build pass), so
+    /// edge wiring is O(1) per edge — O(n + edges) overall, not O(n·edges).
+    fn add_edge(&mut self, src: usize, edge: &Edge) {
         match edge {
             Edge::DoneInPr { pr, .. } => self.by_pr.entry(*pr).or_default().push(src),
             Edge::SurfacedInPr(pr) => self.by_pr.entry(*pr).or_default().push(src),
-            Edge::BlockedOn(id) => match resolve(id) {
+            Edge::BlockedOn(id) => match self.by_id.get(id).copied() {
                 Some(t) => {
                     self.blocked_on.entry(src).or_default().push(t);
                     self.blocks.entry(t).or_default().push(src);
                 }
                 None => self.dangling.push((src, id.clone())),
             },
-            Edge::LinksTo(id) => match resolve(id) {
+            Edge::LinksTo(id) => match self.by_id.get(id).copied() {
                 Some(t) => {
                     self.links_to.entry(src).or_default().push(t);
                     self.linked_from.entry(t).or_default().push(src);
                 }
                 None => self.dangling.push((src, id.clone())),
             },
-            Edge::SupersededBy(id) => match resolve(id) {
+            Edge::SupersededBy(id) => match self.by_id.get(id).copied() {
                 Some(t) => {
                     self.superseded_by.insert(src, t);
                     self.supersedes.entry(t).or_default().push(src);
                 }
                 None => self.dangling.push((src, id.clone())),
             },
-            Edge::CarriedOverFrom(id) => match resolve(id) {
+            Edge::CarriedOverFrom(id) => match self.by_id.get(id).copied() {
                 Some(t) => {
                     self.carried_from.insert(src, t);
                 }

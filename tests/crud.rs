@@ -21,11 +21,7 @@ fn seed(tag: &str) -> Paths {
         include_str!("fixtures/FOLLOWUPS_DONE.md"),
     )
     .unwrap();
-    Paths {
-        open_md: dir.join("FOLLOWUPS.md"),
-        done_md: dir.join("FOLLOWUPS_DONE.md"),
-        cache: dir.join(".followups.cache"),
-    }
+    Paths::resolve(Some(&dir))
 }
 
 fn load(paths: &Paths) -> markdown_project_manager::model::Store {

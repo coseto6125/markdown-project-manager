@@ -14,6 +14,12 @@ pub struct Paths {
     pub open_md: PathBuf,
     pub done_md: PathBuf,
     pub cache: PathBuf,
+    /// Intent-log of pending mutations (one JSON op per line); see `wal`.
+    pub wal: PathBuf,
+    /// flock target serializing WAL appends (held only for "compute + write line").
+    pub wal_lock: PathBuf,
+    /// flock target the group-committer holds to replay the WAL → render → truncate.
+    pub commit_lock: PathBuf,
 }
 
 impl Paths {
@@ -22,6 +28,9 @@ impl Paths {
             open_md: dir.join("FOLLOWUPS.md"),
             done_md: dir.join("FOLLOWUPS_DONE.md"),
             cache: dir.join(".followups.cache"),
+            wal: dir.join(".followups.wal"),
+            wal_lock: dir.join(".followups.wal.lock"),
+            commit_lock: dir.join(".followups.lock"),
         }
     }
 
@@ -38,9 +47,11 @@ impl Paths {
     ///
     /// - `base = Some(dir)` → use `dir` verbatim as the `.claude` directory.
     /// - `base = None` → walk up from `start` to the nearest ancestor containing
-    ///   `.claude/FOLLOWUPS.md` (git-style discovery). When none is found, fall
-    ///   back to `start/.claude` so a first-run `import`/`add` has a sane,
-    ///   cwd-relative home — never a hardcoded absolute path.
+    ///   `.claude/FOLLOWUPS.md` (git-style discovery), **stopping at the first
+    ///   `.git` repo boundary** so search never bleeds out of the current repo
+    ///   into a parent repo's log. When none is found, fall back to
+    ///   `start/.claude` (cwd-relative, never a hardcoded absolute path) so a
+    ///   first-run `import`/`add` has a sane home.
     pub fn resolve_from(base: Option<&Path>, start: &Path) -> Self {
         if let Some(dir) = base {
             return Self::under(dir.to_path_buf());
@@ -50,6 +61,11 @@ impl Paths {
             let claude = d.join(".claude");
             if claude.join("FOLLOWUPS.md").is_file() {
                 return Self::under(claude);
+            }
+            // Repo boundary: a `.git` here with no log above means the log simply
+            // doesn't exist for THIS repo — don't climb into an outer repo's.
+            if d.join(".git").exists() {
+                break;
             }
             cur = d.parent();
         }

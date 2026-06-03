@@ -152,4 +152,19 @@ pub enum Command {
     },
     /// Mint and print the next id for today without creating an entry.
     NextId,
+    /// Re-mint every entry's id as a hash id and rewrite all references (edges,
+    /// superseded-by, and ids in free text). Prints the mapping; `--commit` writes.
+    MigrateIds {
+        #[arg(long)]
+        commit: bool,
+    },
+    /// Install the mpm agent skill. `mpm install claude|codex|gemini` drops it
+    /// into that host's skill directory; `mpm install` (no host) writes the skill
+    /// to a neutral file and prints the path so any other agent can read it and
+    /// decide how to adopt it.
+    Install {
+        /// Target host: claude · codex · gemini. Omit to write the skill to a
+        /// file for an arbitrary agent to pick up.
+        host: Option<String>,
+    },
 }
