@@ -9,7 +9,6 @@ use crate::output::{emit, Format};
 use crate::store::{self, Paths};
 use crate::{render, view};
 use anyhow::{bail, Result};
-use chrono::Local;
 use serde_json::{json, Value};
 
 pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
@@ -64,8 +63,9 @@ pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
         Command::Import { dry_run } => import_cmd(paths, dry_run),
         Command::Validate { json } => validate(paths, json),
         Command::NextId => {
-            let store = store::load(paths)?;
-            println!("{}", next_id(&store));
+            // Hash ids carry no "next" sequence: mint one now (the entry it would
+            // belong to is created later by `add`, which mints its own).
+            println!("{}", crate::id::mint(now_nanos()));
             Ok(())
         }
         // Intercepted in main() before Paths resolution (install targets agent
@@ -94,18 +94,12 @@ fn find(store: &Store, id: &str) -> Result<usize> {
     }
 }
 
-/// Mint `FU-<today>-<NNN>` using the next free daily sequence.
-fn next_id(store: &Store) -> String {
-    let today = Local::now().format("%Y-%m-%d").to_string();
-    let prefix = format!("FU-{today}-");
-    let max = store
-        .entries
-        .iter()
-        .filter_map(|e| e.id.strip_prefix(&prefix))
-        .filter_map(|s| s.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
-    format!("{prefix}{:03}", max + 1)
+/// Nanoseconds since the unix epoch — the entropy source for id minting.
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -120,7 +114,7 @@ fn add(
     surfaced: Option<String>,
 ) -> Result<()> {
     let mut store = store::load(paths)?;
-    let id = next_id(&store);
+    let id = crate::id::mint(now_nanos());
     let provenance = surfaced.map(|s| format!("surfaced in {s}")).unwrap_or_default();
 
     let mut entry = Entry {
