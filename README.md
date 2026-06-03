@@ -35,6 +35,15 @@ cargo install --git https://github.com/coseto6125/markdown-project-manager --bin
 
 或從 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 取得預編譯的執行檔。
 
+## 給 AI agent 用的 skill
+
+`skills/mpm/SKILL.md` 是一份給 LLM coding agent 的 skill 定義：它教 agent
+在三個時機（開工前查相關/阻擋工作、工作中記下延後項、結束後標記完成）透過
+`mpm` 操作 follow-ups，而非讀整份 markdown。把它複製到 `~/.claude/skills/mpm/`
+即可在 Claude Code 中啟用。內容經多輪 A/B 測試校準，連 Haiku 等級的模型也能
+零失誤地產出正確命令（含 `done --pr` vs `--branch` 互斥、`graph` 方向語意、
+重複 id 的處置等易錯點）。
+
 ## 使用方式
 
 `mpm` 從 `--dir <.claude 目錄>` 解析紀錄（預設為 code-graph-nexus 的標準路徑）。
