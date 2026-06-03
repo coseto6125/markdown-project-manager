@@ -21,6 +21,7 @@ rmp-serde = "1"
 etoon = { version = "0.4", default-features = false }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+fs2 = "0.4"
 
 [profile.release]
 lto = true

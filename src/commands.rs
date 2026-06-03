@@ -132,7 +132,7 @@ fn migrate_ids(paths: &Paths, commit: bool) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub fn apply_add(
     store: &mut Store,
-    nanos: u128,
+    id: String,
     category: String,
     scope: String,
     why: Option<String>,
@@ -141,7 +141,6 @@ pub fn apply_add(
     owner: Option<String>,
     surfaced: Option<String>,
 ) -> Result<String> {
-    let id = crate::id::mint(nanos);
     let provenance = surfaced.map(|s| format!("surfaced in {s}")).unwrap_or_default();
 
     let mut entry = Entry {
@@ -188,7 +187,7 @@ fn add(
     let mut store = store::load(paths)?;
     let id = apply_add(
         &mut store,
-        now_nanos(),
+        crate::id::mint(now_nanos()),
         category,
         scope,
         why,

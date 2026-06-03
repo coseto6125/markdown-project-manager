@@ -10,3 +10,4 @@ pub mod parse;
 pub mod render;
 pub mod store;
 pub mod view;
+pub mod wal;

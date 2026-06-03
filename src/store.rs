@@ -14,6 +14,12 @@ pub struct Paths {
     pub open_md: PathBuf,
     pub done_md: PathBuf,
     pub cache: PathBuf,
+    /// Intent-log of pending mutations (one JSON op per line); see `wal`.
+    pub wal: PathBuf,
+    /// flock target serializing WAL appends (held only for "compute + write line").
+    pub wal_lock: PathBuf,
+    /// flock target the group-committer holds to replay the WAL → render → truncate.
+    pub commit_lock: PathBuf,
 }
 
 impl Paths {
@@ -22,6 +28,9 @@ impl Paths {
             open_md: dir.join("FOLLOWUPS.md"),
             done_md: dir.join("FOLLOWUPS_DONE.md"),
             cache: dir.join(".followups.cache"),
+            wal: dir.join(".followups.wal"),
+            wal_lock: dir.join(".followups.wal.lock"),
+            commit_lock: dir.join(".followups.lock"),
         }
     }
 
