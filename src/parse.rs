@@ -278,15 +278,15 @@ fn parse_done_body(body: &str) -> (Option<u32>, Option<String>, Option<String>, 
         let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
         pr = num.parse().ok();
         commit = extract_merged_as(head);
-    } else {
+    } else if let Some((b, rest)) = head.split_once(" commit ") {
         // `<branch> commit <sha>` form.
-        if let Some((b, rest)) = head.split_once(" commit ") {
-            branch = Some(b.trim().to_string());
-            let sha: String = rest.trim().chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-            commit = (!sha.is_empty()).then_some(sha);
-        } else {
-            branch = Some(head.to_string());
-        }
+        branch = Some(b.trim().to_string());
+        let sha: String = rest.trim().chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        commit = (!sha.is_empty()).then_some(sha);
+    } else if !head.is_empty() {
+        // A bare branch name. An empty head (`resolved <date>` with no `in
+        // <target>`) yields no branch — a `DoneInBranch{branch:""}` would be junk.
+        branch = Some(head.to_string());
     }
     (pr, commit, branch, note)
 }
