@@ -365,10 +365,7 @@ fn derive_edges(entry: &mut Entry) {
     }
     // `[[FU-id]]` wikilinks anywhere in the body. Collect targets first (borrowing
     // field values, no clone), then push — releasing the borrow before mutating edges.
-    let link_targets: Vec<String> = field_values(entry)
-        .into_iter()
-        .flat_map(wikilinks)
-        .collect();
+    let link_targets: Vec<String> = field_values(entry).into_iter().flat_map(wikilinks).collect();
     for target in link_targets {
         if !entry
             .edges
