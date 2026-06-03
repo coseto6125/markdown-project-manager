@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Fixed canonical paths for the follow-ups log (see `.claude/CLAUDE.md`).
+/// Resolved paths for the follow-ups log (the `.claude` directory + its files).
 pub struct Paths {
     pub open_md: PathBuf,
     pub done_md: PathBuf,
@@ -17,17 +17,43 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Resolve from an explicit base dir (the `.claude` directory), or the
-    /// canonical default when `base` is `None`.
-    pub fn resolve(base: Option<&Path>) -> Self {
-        let dir = base
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/home/enor/code-graph-nexus/.claude"));
+    fn under(dir: PathBuf) -> Self {
         Paths {
             open_md: dir.join("FOLLOWUPS.md"),
             done_md: dir.join("FOLLOWUPS_DONE.md"),
             cache: dir.join(".followups.cache"),
         }
+    }
+
+    /// Resolve from an explicit base `.claude` dir, or — when `base` is `None` —
+    /// discover the log by walking up from the current directory (see
+    /// [`resolve_from`](Self::resolve_from)).
+    pub fn resolve(base: Option<&Path>) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::resolve_from(base, &cwd)
+    }
+
+    /// Pure resolution against an explicit `start` directory (so it is testable
+    /// without touching the process cwd).
+    ///
+    /// - `base = Some(dir)` → use `dir` verbatim as the `.claude` directory.
+    /// - `base = None` → walk up from `start` to the nearest ancestor containing
+    ///   `.claude/FOLLOWUPS.md` (git-style discovery). When none is found, fall
+    ///   back to `start/.claude` so a first-run `import`/`add` has a sane,
+    ///   cwd-relative home — never a hardcoded absolute path.
+    pub fn resolve_from(base: Option<&Path>, start: &Path) -> Self {
+        if let Some(dir) = base {
+            return Self::under(dir.to_path_buf());
+        }
+        let mut cur = Some(start);
+        while let Some(d) = cur {
+            let claude = d.join(".claude");
+            if claude.join("FOLLOWUPS.md").is_file() {
+                return Self::under(claude);
+            }
+            cur = d.parent();
+        }
+        Self::under(start.join(".claude"))
     }
 }
 

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 )]
 pub struct Cli {
     /// The `.claude` directory holding FOLLOWUPS.md / FOLLOWUPS_DONE.md.
-    /// Defaults to the canonical code-graph-nexus path.
+    /// Omit to auto-discover the nearest one by walking up from the cwd.
     #[arg(long, global = true)]
     pub dir: Option<PathBuf>,
 
