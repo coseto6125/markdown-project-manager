@@ -193,7 +193,10 @@ fn set_alias_field_writes_through_slot_without_duplicating() {
         .find(|b| b.starts_with(id))
         .map(|b| b.matches("- **original-scope**:").count())
         .unwrap_or(0);
-    assert_eq!(in_this_entry, 1, "alias rendered {in_this_entry}x in entry (total {alias_lines}):\n{done}");
+    assert_eq!(
+        in_this_entry, 1,
+        "alias rendered {in_this_entry}x in entry (total {alias_lines}):\n{done}"
+    );
     assert!(done.contains("- **original-scope**: REWRITTEN"));
 }
 
@@ -269,7 +272,9 @@ fn resolved_date_form_yields_no_empty_branch_edge() {
     let store = load(&p);
     let e = store.entries.iter().find(|e| e.id == "FU-2026-05-22-007").unwrap();
     assert!(
-        !e.edges.iter().any(|edge| matches!(edge, Edge::DoneInBranch { branch, .. } if branch.is_empty())),
+        !e.edges
+            .iter()
+            .any(|edge| matches!(edge, Edge::DoneInBranch { branch, .. } if branch.is_empty())),
         "empty-branch DoneInBranch edge synthesized: {:?}",
         e.edges
     );
