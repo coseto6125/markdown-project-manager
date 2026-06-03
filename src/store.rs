@@ -95,28 +95,46 @@ pub fn load(paths: &Paths) -> Result<Store> {
     import(paths)
 }
 
-/// Parse both markdown files into a fresh store and write the cache.
+/// Parse both markdown files into a fresh store. A MISSING file is treated as an
+/// empty log (not an error), so reads against a not-yet-initialized repo return an
+/// empty store rather than failing — initialization happens only on write (`save`).
 pub fn import(paths: &Paths) -> Result<Store> {
-    let open = fs::read_to_string(&paths.open_md).with_context(|| format!("read {}", paths.open_md.display()))?;
-    let done = fs::read_to_string(&paths.done_md).with_context(|| format!("read {}", paths.done_md.display()))?;
+    let open = read_or_empty(&paths.open_md)?;
+    let done = read_or_empty(&paths.done_md)?;
     let store = parse::parse(&open, &done, (mtime(&paths.open_md), mtime(&paths.done_md)));
-    write_cache(paths, &store)?;
+    write_cache(paths, &store);
     Ok(store)
 }
 
-fn write_cache(paths: &Paths, store: &Store) -> Result<()> {
-    let bytes = rmp_serde::to_vec_named(store).context("encode cache")?;
-    fs::write(&paths.cache, bytes).with_context(|| format!("write {}", paths.cache.display()))?;
-    Ok(())
+/// Read a file, returning "" if it does not exist (other IO errors propagate).
+fn read_or_empty(p: &Path) -> Result<String> {
+    match fs::read_to_string(p) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
+    }
+}
+
+/// Best-effort cache write. The cache is a disposable read accelerator; on a
+/// read of an uninitialized repo (no `.claude` dir yet) the write simply no-ops
+/// rather than forcing directory creation as a side effect of reading.
+fn write_cache(paths: &Paths, store: &Store) {
+    if let Ok(bytes) = rmp_serde::to_vec_named(store) {
+        let _ = fs::write(&paths.cache, bytes);
+    }
 }
 
 /// Persist a mutated store: re-render both markdown files, then refresh the
-/// cache with the new mtimes. This is the single write path for every mutation.
+/// cache with the new mtimes. This is the single write path for every mutation —
+/// and the point where a not-yet-initialized log directory is created.
 pub fn save(paths: &Paths, store: &mut Store) -> Result<()> {
+    if let Some(dir) = paths.open_md.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     let (open_md, done_md) = render::render(store);
     fs::write(&paths.open_md, &open_md).with_context(|| format!("write {}", paths.open_md.display()))?;
     fs::write(&paths.done_md, &done_md).with_context(|| format!("write {}", paths.done_md.display()))?;
     store.source_mtimes = (mtime(&paths.open_md), mtime(&paths.done_md));
-    write_cache(paths, store)?;
+    write_cache(paths, store);
     Ok(())
 }
