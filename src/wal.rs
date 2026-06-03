@@ -131,6 +131,10 @@ pub fn apply_op(store: &mut Store, op: Op) -> Result<String> {
 /// Append one op as a JSON line, holding the append lock for just the write.
 pub fn append(paths: &Paths, op: &Op) -> Result<()> {
     let line = serde_json::to_string(op).context("encode WAL op")?;
+    // Initialize the log directory on first write (read paths never create it).
+    if let Some(dir) = paths.wal_lock.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
