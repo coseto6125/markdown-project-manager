@@ -86,6 +86,7 @@ fn add_then_show_roundtrips_fields() {
     let p = seed("add");
     commands::run(
         Command::Add {
+            id: None,
             category: "CLI / Commands".into(),
             scope: "a brand new follow-up".into(),
             why: Some("out-of-scope".into()),

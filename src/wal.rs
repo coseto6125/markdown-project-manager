@@ -212,55 +212,7 @@ pub fn try_group_commit(paths: &Paths) -> Result<bool> {
     if lock.try_lock_exclusive().is_err() {
         return Ok(false); // another committer is draining it
     }
-    let res = (|| {
-        // ROTATE under the append lock: atomically move the current WAL aside so
-        // appends concurrent with this commit land in a fresh WAL and are NOT
-        // swallowed by the truncate. Holding the append lock only for the rename
-        // keeps appenders blocked for sub-ms.
-        let rotated = paths.wal.with_extension("wal.committing");
-        {
-            let alock = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&paths.wal_lock)
-                .with_context(|| format!("open {}", paths.wal_lock.display()))?;
-            alock.lock_exclusive().context("lock WAL for rotate")?;
-            let rotate_res = (|| {
-                // Fold any leftover from a crashed prior commit into this batch.
-                if rotated.exists() {
-                    if let (Ok(mut prev), Ok(cur)) = (std::fs::read(&rotated), std::fs::read(&paths.wal)) {
-                        prev.extend_from_slice(&cur);
-                        std::fs::write(&rotated, &prev)?;
-                        std::fs::write(&paths.wal, b"")?;
-                        return Ok::<bool, anyhow::Error>(true);
-                    }
-                }
-                match std::fs::rename(&paths.wal, &rotated) {
-                    Ok(_) => Ok(true),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                    Err(e) => Err(e.into()),
-                }
-            })();
-            let _ = FileExt::unlock(&alock);
-            if !rotate_res? {
-                return Ok(false);
-            }
-        }
-
-        let text = std::fs::read_to_string(&rotated).unwrap_or_default();
-        if text.trim().is_empty() {
-            let _ = std::fs::remove_file(&rotated);
-            return Ok(false);
-        }
-        let mut store = store::load(paths)?;
-        replay_into(&mut store, &text);
-        store::save(paths, &mut store)?;
-        // Render landed → the rotated batch is durably in markdown; drop it
-        // (at-least-once: a crash before this point replays `rotated` next time).
-        std::fs::remove_file(&rotated).with_context(|| format!("remove {}", rotated.display()))?;
-        Ok(true)
-    })();
+    let res = drain_locked(paths);
     let _ = FileExt::unlock(&lock);
     res
 }
@@ -270,6 +222,79 @@ pub fn submit(paths: &Paths, op: Op) -> Result<()> {
     append(paths, &op)?;
     let _ = try_group_commit(paths);
     Ok(())
+}
+
+/// Run a whole-store maintenance operation (migrate-ids, render) under the commit
+/// lock so it cannot race a group commit's `store::save` (last-writer-wins file
+/// clobber). Drains any pending WAL into markdown FIRST so the maintenance op sees
+/// committed state, then runs `f` while still holding the lock. Blocks for the
+/// lock (these are rare, human-driven commands — correctness over latency).
+pub fn with_commit_lock<T>(paths: &Paths, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.commit_lock)
+        .with_context(|| format!("open {}", paths.commit_lock.display()))?;
+    lock.lock_exclusive().context("lock for maintenance op")?;
+    let res = (|| {
+        // Fold pending ops into markdown before the maintenance op reads it. We
+        // hold the commit lock, so inline the drain rather than recursing into
+        // try_group_commit (which would deadlock trying to re-lock).
+        drain_locked(paths)?;
+        f()
+    })();
+    let _ = FileExt::unlock(&lock);
+    res
+}
+
+/// Replay+commit the WAL assuming the commit lock is ALREADY held. Shared by
+/// `try_group_commit` and `with_commit_lock`. Returns whether anything committed.
+///
+/// Rotates the WAL aside under the append lock (so appends racing the commit land
+/// in a fresh WAL, never swallowed), replays the rotated batch, renders, and drops
+/// it only after the render lands (at-least-once on crash). A leftover rotated
+/// batch from a crashed prior commit is folded into this one.
+fn drain_locked(paths: &Paths) -> Result<bool> {
+    let rotated = paths.wal.with_extension("wal.committing");
+    {
+        let alock = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&paths.wal_lock)
+            .with_context(|| format!("open {}", paths.wal_lock.display()))?;
+        alock.lock_exclusive().context("lock WAL for rotate")?;
+        let rotate_res = (|| {
+            if rotated.exists() {
+                if let (Ok(mut prev), Ok(cur)) = (std::fs::read(&rotated), std::fs::read(&paths.wal)) {
+                    prev.extend_from_slice(&cur);
+                    std::fs::write(&rotated, &prev)?;
+                    std::fs::write(&paths.wal, b"")?;
+                    return Ok::<bool, anyhow::Error>(true);
+                }
+            }
+            match std::fs::rename(&paths.wal, &rotated) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e.into()),
+            }
+        })();
+        let _ = FileExt::unlock(&alock);
+        if !rotate_res? {
+            return Ok(false);
+        }
+    }
+    let text = std::fs::read_to_string(&rotated).unwrap_or_default();
+    if text.trim().is_empty() {
+        let _ = std::fs::remove_file(&rotated);
+        return Ok(false);
+    }
+    let mut store = store::load(paths)?;
+    replay_into(&mut store, &text);
+    store::save(paths, &mut store)?;
+    std::fs::remove_file(&rotated).with_context(|| format!("remove {}", rotated.display()))?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -296,6 +321,19 @@ mod tests {
             owner: None,
             surfaced: None,
         }
+    }
+
+    #[test]
+    fn add_replayed_twice_is_idempotent() {
+        // Models the crash-refold double-apply: the same Add op replayed twice
+        // must yield ONE entry, not a duplicate (which would make `show` ambiguous).
+        let p = paths("idem_add");
+        let mut store = store::load(&p).unwrap();
+        let line = serde_json::to_string(&add_op("FU-dup", "once")).unwrap();
+        let doubled = format!("{line}\n{line}\n");
+        replay_into(&mut store, &doubled);
+        assert_eq!(store.entries.iter().filter(|e| e.id == "FU-dup").count(), 1);
+        let _ = std::fs::remove_dir_all(p.wal.parent().unwrap());
     }
 
     #[test]
