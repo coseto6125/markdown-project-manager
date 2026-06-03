@@ -29,15 +29,29 @@ mpm stub FU-2026-05-23-042           # 那一行 resolution stub
 
 ## 安裝
 
+**從原始碼（任何平台，需 Rust toolchain）**
+
 ```
 cargo install --git https://github.com/coseto6125/markdown-project-manager --bin mpm --locked
 ```
 
-或從 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 取得預編譯的執行檔。
+釘特定版本：在後面加 `--tag v0.1.0`。
+
+**預編譯執行檔（Linux x86_64/arm64 · macOS x86_64/arm64 · Windows x86_64）**
+
+到 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 下載對應平台的
+`.tar.gz` / `.zip`，解出 `mpm`（Windows 為 `mpm.exe`）放到 `PATH` 上的目錄。每個壓縮檔都附
+`.sha256` 可驗完整性，並帶 SLSA build provenance：
+
+```
+gh attestation verify ./mpm --owner coseto6125
+```
 
 ## 使用方式
 
-`mpm` 從 `--dir <.claude 目錄>` 解析紀錄（預設為 code-graph-nexus 的標準路徑）。
+`mpm` 像 git 找 `.git` 一樣，**從目前目錄往上找最近的 `.claude/FOLLOWUPS.md`**，
+所以在任一 repo 內直接 `mpm <指令>` 就會操作該 repo 的紀錄；找不到時退回目前目錄的
+`.claude/`（首次 `import` / `add` 的落點）。用 `--dir <.claude 目錄>` 指向別的 repo。
 所有讀取指令都接受 `--json`；變更指令會把受影響的 id 印到 stdout，方便 agent 擷取。
 
 ### 建立 / 讀取
