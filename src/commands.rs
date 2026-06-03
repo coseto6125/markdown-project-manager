@@ -68,6 +68,7 @@ pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
             println!("{}", crate::id::mint(now_nanos()));
             Ok(())
         }
+        Command::MigrateIds { commit } => migrate_ids(paths, commit),
         // Intercepted in main() before Paths resolution (install targets agent
         // hosts, not a follow-ups log).
         Command::Install { .. } => unreachable!("Install is handled in main"),
@@ -100,6 +101,32 @@ fn now_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+fn migrate_ids(paths: &Paths, commit: bool) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let renames = crate::migrate::build_mapping(&store, now_nanos());
+    if renames.is_empty() {
+        println!("no entries to migrate");
+        return Ok(());
+    }
+    if !commit {
+        println!(
+            "DRY RUN — {} entries would be re-minted (pass --commit to write):",
+            renames.len()
+        );
+        for r in &renames {
+            println!("  {} → {}", r.old, r.new);
+        }
+        let mut preview = store.clone();
+        let refs = crate::migrate::apply(&mut preview, &renames);
+        println!("{refs} textual reference(s) would be rewritten across edges + free text");
+        return Ok(());
+    }
+    let refs = crate::migrate::apply(&mut store, &renames);
+    store::save(paths, &mut store)?;
+    println!("migrated {} entries, rewrote {} references", renames.len(), refs);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

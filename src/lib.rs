@@ -3,6 +3,7 @@ pub mod commands;
 pub mod id;
 pub mod index;
 pub mod install;
+pub mod migrate;
 pub mod model;
 pub mod output;
 pub mod parse;
