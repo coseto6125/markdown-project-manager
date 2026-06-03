@@ -75,8 +75,11 @@ mpm link <from-id> <to-id>                                # records a links-to e
 
 ## Mint a new id only when adding
 
-`mpm add` mints the id for you and prints it — do not pre-compute ids. Use
-`mpm next-id` only when you need to reference the id *before* creating the entry.
+`mpm add` mints the id for you and prints it — do not pre-compute ids. Only when
+you must reference the id *before* the entry exists: reserve it with `mpm next-id`,
+then create the entry with that exact id via `mpm add --id <id> ...`. (Plain
+`mpm add` without `--id` mints its own, so a bare `next-id` you don't pass back is
+never stored.)
 
 ## When NOT to use mpm
 
