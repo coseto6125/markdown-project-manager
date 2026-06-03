@@ -19,7 +19,7 @@
 mpm list --status open               # 分流，不讀全檔
 mpm show FU-2026-05-23-042            # 單筆 entry
 mpm query pr:498                      # 這個 PR 是否已關掉某 follow-up？
-mpm graph FU-2026-05-23-048 --direction down   # 有什麼 blocked 在這之上？
+mpm graph FU-2026-05-23-048 --direction up     # 有什麼 follow-up 依賴（blocked on）這條？
 mpm stub FU-2026-05-23-042           # 那一行 resolution stub
 ```
 
@@ -34,6 +34,15 @@ cargo install --git https://github.com/coseto6125/markdown-project-manager --bin
 ```
 
 或從 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 取得預編譯的執行檔。
+
+## 給 AI agent 用的 skill
+
+`skills/mpm/SKILL.md` 是一份給 LLM coding agent 的 skill 定義：它教 agent
+在三個時機（開工前查相關/阻擋工作、工作中記下延後項、結束後標記完成）透過
+`mpm` 操作 follow-ups，而非讀整份 markdown。把它複製到 `~/.claude/skills/mpm/`
+即可在 Claude Code 中啟用。內容經多輪 A/B 測試校準，連 Haiku 等級的模型也能
+零失誤地產出正確命令（含 `done --pr` vs `--branch` 互斥、`graph` 方向語意、
+重複 id 的處置等易錯點）。
 
 ## 使用方式
 
