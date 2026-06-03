@@ -1,51 +1,46 @@
 # mpm — Markdown Project Manager
 
-Structured CRUD + graph queries over a markdown deferred-work log, built for
-LLM coding agents. The markdown stays the human-readable source of truth; `mpm`
-gives an agent **exactly the slice it needs without reading the whole file** —
-one entry, one stub, one relationship hop, one PR lookup.
+對 markdown 待辦工作紀錄做結構化 CRUD 與圖譜查詢的工具，專為 LLM coding agent
+打造。markdown 仍是人類可讀的真相來源；`mpm` 讓 agent **不必讀整份檔，就能精準
+拿到所需的片段** —— 一筆 entry、一行 stub、一次關係跳轉、一次 PR 查詢。
 
-It targets the two-file "follow-ups" protocol (`FOLLOWUPS.md` for open work,
-`FOLLOWUPS_DONE.md` for the resolved archive), but the model is general: ordered
-entries with a small set of core fields, free-form extra fields, and typed
-relationships (`blocked-on`, `links-to`, `superseded-by`, `done-in-PR`,
-`carried-over-from`).
+它針對的是雙檔「follow-ups」協定（`FOLLOWUPS.md` 存進行中的工作、
+`FOLLOWUPS_DONE.md` 存已解決的封存），但資料模型是通用的：有序的 entry、一小組
+核心欄位、自由形式的額外欄位，以及具型別的關係（`blocked-on`、`links-to`、
+`superseded-by`、`done-in-PR`、`carried-over-from`）。
 
-## Why
+## 為什麼需要
 
-The protocol says *"read the log before opening any PR."* For an agent that is a
-27 KB+ file read on every task — pure context-window tax. `mpm` replaces the grep
-with structured queries that return signal-dense [toon](https://crates.io/crates/etoon)
-(or `--json`):
+協定規定 *「開任何 PR 前先讀紀錄」*。對 agent 而言，這等於每個任務都要讀一份
+27 KB+ 的檔案 —— 純粹的 context window 稅。`mpm` 用結構化查詢取代 grep，回傳
+訊號密集的 [toon](https://crates.io/crates/etoon)（或 `--json`）：
 
 ```
-mpm list --status open               # triage, no full-file read
-mpm show FU-2026-05-23-042            # one entry
-mpm query pr:498                      # did this PR already close a follow-up?
-mpm graph FU-2026-05-23-048 --direction down   # what's blocked on this?
-mpm stub FU-2026-05-23-042           # the one-line resolution stub
+mpm list --status open               # 分流，不讀全檔
+mpm show FU-2026-05-23-042            # 單筆 entry
+mpm query pr:498                      # 這個 PR 是否已關掉某 follow-up？
+mpm graph FU-2026-05-23-048 --direction down   # 有什麼 blocked 在這之上？
+mpm stub FU-2026-05-23-042           # 那一行 resolution stub
 ```
 
-Every mutation writes a structured store and **re-renders both markdown files**,
-so the human-facing log stays in lockstep and git-diffable. A disposable msgpack
-cache (guarded by file mtime + schema version) makes reads sub-millisecond;
-manual markdown edits are absorbed by `mpm import`.
+每次變更都會寫入結構化 store 並 **重新渲染兩份 markdown 檔**，讓人類面對的紀錄
+保持同步且可 git-diff。一份可丟棄的 msgpack 快取（以檔案 mtime + schema 版本
+守門）讓讀取維持次毫秒級；手動改的 markdown 由 `mpm import` 吸收回 store。
 
-## Install
+## 安裝
 
 ```
 cargo install --git https://github.com/coseto6125/markdown-project-manager --bin mpm --locked
 ```
 
-Or grab a prebuilt binary from [Releases](https://github.com/coseto6125/markdown-project-manager/releases).
+或從 [Releases](https://github.com/coseto6125/markdown-project-manager/releases) 取得預編譯的執行檔。
 
-## Usage
+## 使用方式
 
-`mpm` resolves the log from `--dir <.claude dir>` (defaults to the canonical
-code-graph-nexus path). All read commands accept `--json`; mutations print the
-affected id on stdout so an agent can capture it.
+`mpm` 從 `--dir <.claude 目錄>` 解析紀錄（預設為 code-graph-nexus 的標準路徑）。
+所有讀取指令都接受 `--json`；變更指令會把受影響的 id 印到 stdout，方便 agent 擷取。
 
-### Create / read
+### 建立 / 讀取
 
 ```
 mpm add --category "Parser & Schema" --scope "..." --why "..." --size S --surfaced "PR #520"
@@ -55,7 +50,7 @@ mpm list [--status open|done|wontfix] [--category C] [--size S|M|L] [--blocked] 
 mpm next-id
 ```
 
-### Mutate
+### 變更
 
 ```
 mpm set <id> --field scope --value "..." [--append]
@@ -69,27 +64,27 @@ mpm reopen <id>
 mpm link <from> <to>
 ```
 
-### Graph / query / maintenance
+### 圖譜 / 查詢 / 維護
 
 ```
 mpm graph <id> [--direction up|down|both] [--depth N] [--json]
-mpm query status:open size:L          # flat key:value AND filters
-mpm query pr:385                       # filters: status, category, size, pr, blocked-on, links-to, owner
-mpm render [--check]                   # re-render markdown; --check exits 1 on drift
-mpm import [--dry-run]                 # parse markdown into the store
-mpm validate                           # dangling links, duplicate ids
+mpm query status:open size:L          # 扁平的 key:value AND 過濾
+mpm query pr:385                       # 可用過濾鍵：status、category、size、pr、blocked-on、links-to、owner
+mpm render [--check]                   # 重新渲染 markdown；--check 偵測漂移時 exit 1
+mpm import [--dry-run]                 # 解析 markdown 進 store
+mpm validate                           # dangling 連結、重複 id
 ```
 
-## Data model
+## 資料模型
 
-| Concept | Notes |
+| 概念 | 說明 |
 |---|---|
-| Entry | `id` + `category` + `status` + 6 core fields (owner/scope/why-deferred/next-action/size/links) + ordered extra fields |
-| Field order | preserved verbatim per entry (`original-scope` round-trips as `original-scope`, one-off keys keep their spot) |
-| Status | `open` · `done` · `wontfix` · `blocked` (stays open) · `superseded` |
-| Edges | `blocked-on`, `links-to` (from `[[FU-id]]`), `superseded-by`, `carried-over-from`, `done-in-PR`, `surfaced-in-PR` |
-| Render | canonical form; the first `import` + render is a one-time normalization, then byte-stable |
+| Entry | `id` + `category` + `status` + 6 個核心欄位（owner/scope/why-deferred/next-action/size/links）+ 有序的額外欄位 |
+| 欄位順序 | 逐筆 verbatim 保留（`original-scope` 原樣 round-trip 成 `original-scope`，一次性的鍵保留原位） |
+| Status | `open` · `done` · `wontfix` · `blocked`（留在 open）· `superseded` |
+| Edges | `blocked-on`、`links-to`（來自 `[[FU-id]]`）、`superseded-by`、`carried-over-from`、`done-in-PR`、`surfaced-in-PR` |
+| 渲染 | canonical 形式；第一次 `import` + render 是一次性正規化，之後 byte-stable |
 
-## License
+## 授權
 
 MIT
