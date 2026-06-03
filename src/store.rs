@@ -16,17 +16,50 @@ pub struct Paths {
     pub cache: PathBuf,
 }
 
+/// The hard-coded log used only when neither `--dir` nor an upward `.claude`
+/// search finds a log — preserves the original "run mpm anywhere to manage the
+/// code-graph-nexus log" behavior.
+const FALLBACK_DIR: &str = "/home/enor/code-graph-nexus/.claude";
+
 impl Paths {
-    /// Resolve from an explicit base dir (the `.claude` directory), or the
-    /// canonical default when `base` is `None`.
+    /// Resolve the `.claude` directory: an explicit `base` wins; otherwise walk up
+    /// from the cwd for the nearest `.claude/FOLLOWUPS.md` (like git finding `.git`),
+    /// so `mpm` inside any repo targets that repo's log without `--dir`. Falls back
+    /// to the canonical path when no enclosing log is found.
     pub fn resolve(base: Option<&Path>) -> Self {
         let dir = base
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/home/enor/code-graph-nexus/.claude"));
+            .or_else(discover_claude_dir)
+            .unwrap_or_else(|| PathBuf::from(FALLBACK_DIR));
+        Paths::from_dir(&dir)
+    }
+
+    fn from_dir(dir: &Path) -> Self {
         Paths {
             open_md: dir.join("FOLLOWUPS.md"),
             done_md: dir.join("FOLLOWUPS_DONE.md"),
             cache: dir.join(".followups.cache"),
+        }
+    }
+}
+
+/// Walk up from the current directory for the nearest `.claude/FOLLOWUPS.md`.
+fn discover_claude_dir() -> Option<PathBuf> {
+    find_claude_upward(&std::env::current_dir().ok()?)
+}
+
+/// Walk up from `start` for the nearest `.claude/FOLLOWUPS.md`, returning that
+/// `.claude` dir. Requiring the log file (not just a `.claude` dir) avoids
+/// matching an unrelated `.claude` that holds no follow-ups.
+pub fn find_claude_upward(start: &Path) -> Option<PathBuf> {
+    let mut cur = start.to_path_buf();
+    loop {
+        let candidate = cur.join(".claude");
+        if candidate.join("FOLLOWUPS.md").is_file() {
+            return Some(candidate);
+        }
+        if !cur.pop() {
+            return None;
         }
     }
 }
