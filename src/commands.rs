@@ -75,6 +75,21 @@ fn fmt(json: bool) -> Format {
     Format::from_json_flag(json)
 }
 
+/// Sort the candidate indices by id, project each to its list-view JSON, and emit
+/// the `{count, entries}` envelope. Shared by `list` and `query`.
+fn emit_entries(store: &Store, mut candidates: Vec<usize>, json: bool) -> Result<()> {
+    candidates.sort_by(|&a, &b| store.entries[a].id.cmp(&store.entries[b].id));
+    let items: Vec<Value> = candidates
+        .iter()
+        .map(|&i| view::entry_json(&store.entries[i], false))
+        .collect();
+    println!(
+        "{}",
+        emit(&json!({ "count": items.len(), "entries": items }), fmt(json))?
+    );
+    Ok(())
+}
+
 /// Find an entry index by id, erroring if absent or ambiguous.
 fn find(store: &Store, id: &str) -> Result<usize> {
     let matches: Vec<usize> = store
@@ -140,7 +155,7 @@ fn add(
         resolution: None,
     };
     // Canonical field order for a fresh entry.
-    for k in ["owner", "scope", "why-deferred", "next-action", "size", "links"] {
+    for &k in CORE_KEYS {
         if entry.core.slot(k).map(|s| s.is_some()).unwrap_or(false) {
             entry.field_order.push(FieldRef::Core(k.to_string()));
         }
@@ -201,17 +216,7 @@ fn list(
         let hits = idx.by_pr.get(&p).cloned().unwrap_or_default();
         candidates.retain(|i| hits.contains(i));
     }
-    candidates.sort_by(|&a, &b| store.entries[a].id.cmp(&store.entries[b].id));
-
-    let items: Vec<Value> = candidates
-        .iter()
-        .map(|&i| view::entry_json(&store.entries[i], false))
-        .collect();
-    println!(
-        "{}",
-        emit(&json!({ "count": items.len(), "entries": items }), fmt(json))?
-    );
-    Ok(())
+    emit_entries(&store, candidates, json)
 }
 
 fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Result<()> {
@@ -522,16 +527,7 @@ fn query(paths: &Paths, filters: &[String], json: bool) -> Result<()> {
             other => bail!("unknown filter key `{other}`"),
         }
     }
-    candidates.sort_by(|&a, &b| store.entries[a].id.cmp(&store.entries[b].id));
-    let items: Vec<Value> = candidates
-        .iter()
-        .map(|&i| view::entry_json(&store.entries[i], false))
-        .collect();
-    println!(
-        "{}",
-        emit(&json!({ "count": items.len(), "entries": items }), fmt(json))?
-    );
-    Ok(())
+    emit_entries(&store, candidates, json)
 }
 
 fn render_cmd(paths: &Paths, check: bool) -> Result<()> {

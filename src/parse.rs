@@ -250,15 +250,11 @@ fn parse_resolution_text(text: &str) -> Option<Resolution> {
         .unwrap_or("");
     let (pr, commit, branch, note) = parse_done_body(done_body);
     Some(Resolution {
-        kind: ResKind::Done,
-        raw,
         pr,
         commit,
         branch,
         note,
-        superseded_by: None,
-        wontfix_reason: None,
-        date: None,
+        ..Resolution::of(ResKind::Done, raw)
     })
 }
 

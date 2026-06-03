@@ -165,11 +165,7 @@ fn render_entry(entry: &Entry, location: Location) -> String {
     out
 }
 
-/// The trailing `✅ done in PR #N …` segment for a DONE heading, rendered from
-/// the resolution's verbatim `raw` text plus its marker glyph.
+/// The trailing `✅ done in PR #N …` segment for a DONE heading.
 fn heading_resolution_segment(entry: &Entry) -> Option<String> {
-    let r = entry.resolution.as_ref()?;
-    let marker = r.marker();
-    let sep = if marker.is_empty() { "" } else { " " };
-    Some(format!("{marker}{sep}{}", r.raw))
+    Some(entry.resolution.as_ref()?.rendered())
 }
