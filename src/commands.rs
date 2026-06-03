@@ -225,16 +225,31 @@ fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Res
 }
 
 /// Set or append a field, preserving canonical-vs-alias spelling + order.
+///
+/// A core slot may be rendered under a non-canonical alias (e.g. `original-scope`
+/// → `scope` slot). Both `set --field original-scope` and `set --field scope`
+/// must write that one slot and reuse the existing render entry, never appending
+/// a second `FieldRef` that would render the slot twice with a stale value.
 fn apply_field(entry: &mut Entry, key: &str, value: String, append: bool) {
-    // Existing core slot?
+    // An existing alias whose spelling matches `key` (e.g. `original-scope`):
+    // write through its slot, keep its render entry.
+    if let Some(slot) = alias_slot(entry, key) {
+        let s = entry.core.slot_mut(&slot).unwrap();
+        *s = Some(merge(s.take(), value, append));
+        return;
+    }
+    // A canonical core key.
     if CORE_KEYS.contains(&key) {
         let slot = entry.core.slot_mut(key).unwrap();
         *slot = Some(merge(slot.take(), value, append));
-        if !entry
-            .field_order
-            .iter()
-            .any(|f| matches!(f, FieldRef::Core(k) if k == key))
-        {
+        // Already rendered (as Core or as a CoreAlias targeting this slot)? Then
+        // don't add another FieldRef — the slot would render twice.
+        let already_rendered = entry.field_order.iter().any(|f| match f {
+            FieldRef::Core(k) => k == key,
+            FieldRef::CoreAlias { slot, .. } => slot == key,
+            FieldRef::Extra(_) => false,
+        });
+        if !already_rendered {
             entry.field_order.push(FieldRef::Core(key.to_string()));
         }
         return;
@@ -249,6 +264,14 @@ fn apply_field(entry: &mut Entry, key: &str, value: String, append: bool) {
     let idx = entry.extra.len();
     entry.extra.push((key.to_string(), value));
     entry.field_order.push(FieldRef::Extra(idx));
+}
+
+/// The core slot rendered under the alias spelling `key`, if one exists.
+fn alias_slot(entry: &Entry, key: &str) -> Option<String> {
+    entry.field_order.iter().find_map(|f| match f {
+        FieldRef::CoreAlias { key: k, slot } if k == key => Some(slot.clone()),
+        _ => None,
+    })
 }
 
 fn merge(existing: Option<String>, value: String, append: bool) -> String {
@@ -286,8 +309,9 @@ fn done(
     e.resolution = Some(resolution);
     e.status = Status::Done;
     e.location = Location::Done;
-    // Drop blocked-on edges; the entry is resolved.
-    e.edges.retain(|edge| !matches!(edge, Edge::BlockedOn(_)));
+    // Keep any manual blocked-on edge: it isn't re-derivable from body text, so
+    // dropping it would silently lose the dependency if the entry is reopened.
+    // The resolution forces status=Done while set, so it can't surface as Blocked.
     rebuild_edges(e);
     store::save(paths, &mut store)?;
     println!("{id}");

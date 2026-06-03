@@ -163,6 +163,124 @@ fn wontfix_archives_with_reason() {
 }
 
 #[test]
+fn set_alias_field_writes_through_slot_without_duplicating() {
+    // FU-2026-05-27-001 stores its scope under the `original-scope` alias.
+    let p = seed("set_alias_through");
+    let id = "FU-2026-05-27-001";
+
+    commands::run(
+        Command::Set {
+            id: id.into(),
+            field: "original-scope".into(),
+            value: "REWRITTEN".into(),
+            append: false,
+        },
+        &p,
+    )
+    .unwrap();
+
+    let store = load(&p);
+    let e = store.entries.iter().find(|e| e.id == id).unwrap();
+    // Written through to the scope slot, not appended as a stale extra.
+    assert_eq!(e.core.scope.as_deref(), Some("REWRITTEN"));
+    assert!(e.extra.iter().all(|(k, _)| k != "original-scope"));
+
+    // The Done file renders the alias key exactly once with the new value.
+    let done = fs::read_to_string(&p.done_md).unwrap();
+    let alias_lines = done.matches("- **original-scope**:").count();
+    let in_this_entry = done
+        .split("### ")
+        .find(|b| b.starts_with(id))
+        .map(|b| b.matches("- **original-scope**:").count())
+        .unwrap_or(0);
+    assert_eq!(
+        in_this_entry, 1,
+        "alias rendered {in_this_entry}x in entry (total {alias_lines}):\n{done}"
+    );
+    assert!(done.contains("- **original-scope**: REWRITTEN"));
+}
+
+#[test]
+fn set_canonical_key_on_aliased_slot_does_not_double_render() {
+    // Setting `scope` when the slot is rendered via `original-scope` must not add
+    // a second FieldRef that renders the same slot twice.
+    let p = seed("set_canon_on_alias");
+    let id = "FU-2026-05-27-001";
+
+    commands::run(
+        Command::Set {
+            id: id.into(),
+            field: "scope".into(),
+            value: "VIA_CANON".into(),
+            append: false,
+        },
+        &p,
+    )
+    .unwrap();
+
+    let store = load(&p);
+    let e = store.entries.iter().find(|e| e.id == id).unwrap();
+    assert_eq!(e.core.scope.as_deref(), Some("VIA_CANON"));
+
+    let done = fs::read_to_string(&p.done_md).unwrap();
+    let entry_block = done.split("### ").find(|b| b.starts_with(id)).unwrap();
+    let alias_count = entry_block.matches("- **original-scope**:").count();
+    let scope_count = entry_block.matches("- **scope**:").count();
+    assert_eq!(alias_count + scope_count, 1, "slot rendered twice:\n{entry_block}");
+}
+
+#[test]
+fn done_keeps_manual_block_so_reopen_restores_it() {
+    let p = seed("done_keeps_block");
+    let id = "FU-2026-05-23-021";
+
+    commands::run(
+        Command::Block {
+            id: id.into(),
+            on: "FU-2026-05-23-007".into(),
+        },
+        &p,
+    )
+    .unwrap();
+    commands::run(
+        Command::Done {
+            id: id.into(),
+            pr: Some(900),
+            branch: None,
+            commit: None,
+            note: None,
+        },
+        &p,
+    )
+    .unwrap();
+
+    // While resolved, the resolution forces Done despite the lingering edge.
+    let e = load(&p).entries.iter().find(|e| e.id == id).cloned().unwrap();
+    assert_eq!(e.status, Status::Done);
+
+    commands::run(Command::Reopen { id: id.into() }, &p).unwrap();
+    let e = load(&p).entries.iter().find(|e| e.id == id).cloned().unwrap();
+    // The manual block survived the done→reopen round-trip.
+    assert_eq!(e.status, Status::Blocked, "blocked-on lost across done→reopen");
+}
+
+#[test]
+fn resolved_date_form_yields_no_empty_branch_edge() {
+    use markdown_project_manager::model::Edge;
+    // FU-2026-05-22-007 resolves via `resolved 2026-05-25 — …` (no `in <target>`).
+    let p = seed("resolved_date_form");
+    let store = load(&p);
+    let e = store.entries.iter().find(|e| e.id == "FU-2026-05-22-007").unwrap();
+    assert!(
+        !e.edges
+            .iter()
+            .any(|edge| matches!(edge, Edge::DoneInBranch { branch, .. } if branch.is_empty())),
+        "empty-branch DoneInBranch edge synthesized: {:?}",
+        e.edges
+    );
+}
+
+#[test]
 fn cache_is_reused_when_fresh_and_reimported_when_stale() {
     let p = seed("cache");
     // First load builds + writes the cache.
