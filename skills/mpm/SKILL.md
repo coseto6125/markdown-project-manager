@@ -18,12 +18,16 @@ of truth — every change re-renders both files.
 
 If you open a PR without checking the log first, you have skipped the one rule.
 
-## --dir: always point at the right log
+## Which log mpm uses (you rarely need --dir)
 
-`mpm` defaults to one hard-coded log path. **Any other repo, pass `--dir <path-to-.claude-dir>`** as the FIRST argument. When unsure, pass it explicitly:
+`mpm` finds the log automatically by walking up from the current directory to the
+nearest `.claude/FOLLOWUPS.md` — like git finding `.git`. So **inside any repo,
+just run `mpm <cmd>`** and it targets that repo's log. Pass `--dir <path-to-.claude>`
+only to point at a DIFFERENT repo's log than the one you're standing in:
 
 ```
-mpm --dir /path/to/repo/.claude list --status open
+mpm list --status open                          # this repo's log (auto-found)
+mpm --dir /other/repo/.claude list --status open  # explicitly another repo's log
 ```
 
 ## Read (never mutates)

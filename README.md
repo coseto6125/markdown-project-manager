@@ -19,7 +19,7 @@
 mpm list --status open               # 分流，不讀全檔
 mpm show FU-2026-05-23-042            # 單筆 entry
 mpm query pr:498                      # 這個 PR 是否已關掉某 follow-up？
-mpm graph FU-2026-05-23-048 --direction down   # 有什麼 blocked 在這之上？
+mpm graph FU-2026-05-23-048 --direction up     # 有什麼 follow-up 依賴（blocked on）這條？
 mpm stub FU-2026-05-23-042           # 那一行 resolution stub
 ```
 
