@@ -130,8 +130,9 @@ fn migrate_ids(paths: &Paths, commit: bool) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add(
-    paths: &Paths,
+pub fn apply_add(
+    store: &mut Store,
+    nanos: u128,
     category: String,
     scope: String,
     why: Option<String>,
@@ -139,9 +140,8 @@ fn add(
     size: Option<String>,
     owner: Option<String>,
     surfaced: Option<String>,
-) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let id = crate::id::mint(now_nanos());
+) -> Result<String> {
+    let id = crate::id::mint(nanos);
     let provenance = surfaced.map(|s| format!("surfaced in {s}")).unwrap_or_default();
 
     let mut entry = Entry {
@@ -171,6 +171,32 @@ fn add(
     }
     rebuild_edges(&mut entry);
     store.entries.push(entry);
+    Ok(id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add(
+    paths: &Paths,
+    category: String,
+    scope: String,
+    why: Option<String>,
+    next: Option<String>,
+    size: Option<String>,
+    owner: Option<String>,
+    surfaced: Option<String>,
+) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_add(
+        &mut store,
+        now_nanos(),
+        category,
+        scope,
+        why,
+        next,
+        size,
+        owner,
+        surfaced,
+    )?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
@@ -238,11 +264,16 @@ fn list(
     Ok(())
 }
 
-fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_set(store: &mut Store, id: &str, field: &str, value: String, append: bool) -> Result<String> {
+    let i = find(store, id)?;
     apply_field(&mut store.entries[i], field, value, append);
     rebuild_edges(&mut store.entries[i]);
+    Ok(id.to_string())
+}
+
+fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_set(&mut store, id, field, value, append)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
@@ -282,25 +313,29 @@ fn merge(existing: Option<String>, value: String, append: bool) -> String {
     }
 }
 
+pub fn apply_move_category(store: &mut Store, id: &str, category: String) -> Result<String> {
+    let i = find(store, id)?;
+    store.entries[i].category = category;
+    Ok(id.to_string())
+}
+
 fn move_category(paths: &Paths, id: &str, category: String) -> Result<()> {
     let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
-    store.entries[i].category = category;
+    let id = apply_move_category(&mut store, id, category)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn done(
-    paths: &Paths,
+pub fn apply_done(
+    store: &mut Store,
     id: &str,
     pr: Option<u32>,
     branch: Option<String>,
     commit: Option<String>,
     note: Option<String>,
-) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+) -> Result<String> {
+    let i = find(store, id)?;
     let resolution = match (pr, branch) {
         (Some(pr), _) => Resolution::done_pr(pr, commit, note),
         (None, Some(b)) => Resolution::done_branch(b, commit, note),
@@ -313,41 +348,63 @@ fn done(
     // Drop blocked-on edges; the entry is resolved.
     e.edges.retain(|edge| !matches!(edge, Edge::BlockedOn(_)));
     rebuild_edges(e);
+    Ok(id.to_string())
+}
+
+fn done(
+    paths: &Paths,
+    id: &str,
+    pr: Option<u32>,
+    branch: Option<String>,
+    commit: Option<String>,
+    note: Option<String>,
+) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_done(&mut store, id, pr, branch, commit, note)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn wontfix(paths: &Paths, id: &str, reason: String) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_wontfix(store: &mut Store, id: &str, reason: String) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.resolution = Some(Resolution::wontfix(reason));
     e.status = Status::Wontfix;
     e.location = Location::Done;
     rebuild_edges(e);
+    Ok(id.to_string())
+}
+
+fn wontfix(paths: &Paths, id: &str, reason: String) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_wontfix(&mut store, id, reason)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn supersede(paths: &Paths, id: &str, by: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    find(&store, by)?; // target must exist
-    let i = find(&store, id)?;
+pub fn apply_supersede(store: &mut Store, id: &str, by: &str) -> Result<String> {
+    find(store, by)?; // target must exist
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.resolution = Some(Resolution::superseded(by.to_string()));
     e.status = Status::Superseded;
     e.location = Location::Done;
     rebuild_edges(e);
+    Ok(id.to_string())
+}
+
+fn supersede(paths: &Paths, id: &str, by: &str) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_supersede(&mut store, id, by)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_block(store: &mut Store, id: &str, on: &str) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     if !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(t) if t == on)) {
         e.edges.push(Edge::BlockedOn(on.to_string()));
@@ -355,14 +412,19 @@ fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
     if e.status == Status::Open {
         e.status = Status::Blocked;
     }
+    Ok(id.to_string())
+}
+
+fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_block(&mut store, id, on)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.edges.retain(|edge| match (edge, on) {
         (Edge::BlockedOn(t), Some(target)) => t != target,
@@ -372,32 +434,48 @@ fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
     if e.status == Status::Blocked && !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(_))) {
         e.status = Status::Open;
     }
+    Ok(id.to_string())
+}
+
+fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_unblock(&mut store, id, on)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn reopen(paths: &Paths, id: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    let i = find(&store, id)?;
+pub fn apply_reopen(store: &mut Store, id: &str) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
     e.resolution = None;
     e.status = Status::Open;
     e.location = Location::Open;
     rebuild_edges(e);
+    Ok(id.to_string())
+}
+
+fn reopen(paths: &Paths, id: &str) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let id = apply_reopen(&mut store, id)?;
     store::save(paths, &mut store)?;
     println!("{id}");
     Ok(())
 }
 
-fn link(paths: &Paths, from: &str, to: &str) -> Result<()> {
-    let mut store = store::load(paths)?;
-    find(&store, to)?;
-    let i = find(&store, from)?;
+pub fn apply_link(store: &mut Store, from: &str, to: &str) -> Result<String> {
+    find(store, to)?;
+    let i = find(store, from)?;
     let e = &mut store.entries[i];
     if !e.edges.iter().any(|edge| matches!(edge, Edge::LinksTo(t) if t == to)) {
         e.edges.push(Edge::LinksTo(to.to_string()));
     }
+    Ok(from.to_string())
+}
+
+fn link(paths: &Paths, from: &str, to: &str) -> Result<()> {
+    let mut store = store::load(paths)?;
+    let from = apply_link(&mut store, from, to)?;
     store::save(paths, &mut store)?;
     println!("{from}");
     Ok(())
