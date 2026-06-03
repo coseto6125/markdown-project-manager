@@ -24,7 +24,8 @@ impl Format {
 /// Encode a JSON value as toon or json.
 pub fn emit(value: &Value, format: Format) -> Result<String> {
     match format {
-        Format::Json => serde_json::to_string_pretty(value).context("json serialize"),
+        // Compact, not pretty: --json is the machine path; whitespace is wasted bytes.
+        Format::Json => serde_json::to_string(value).context("json serialize"),
         Format::Toon => {
             let bytes = serde_json::to_vec(value).context("json serialize")?;
             _etoon::toon::encode(&bytes).map_err(|e| anyhow::anyhow!("toon encode: {e}"))

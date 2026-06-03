@@ -12,13 +12,8 @@ pub fn entry_json(entry: &Entry, full: bool) -> Value {
     m.insert("id".into(), json!(entry.id));
     m.insert("status".into(), json!(entry.status.as_str()));
     m.insert("category".into(), json!(entry.category));
-    m.insert(
-        "location".into(),
-        json!(match entry.location {
-            Location::Open => "open",
-            Location::Done => "done",
-        }),
-    );
+    // `location` is omitted: it's a total function of status (done/wontfix/
+    // superseded → archive, open/blocked → active), so emitting it wastes bytes.
     if let Some(sz) = &entry.core.size {
         m.insert("size".into(), json!(sz));
     }
