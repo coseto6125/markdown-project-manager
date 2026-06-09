@@ -56,21 +56,60 @@ impl Paths {
         if let Some(dir) = base {
             return Self::under(dir.to_path_buf());
         }
-        let mut cur = Some(start);
-        while let Some(d) = cur {
+        let mut fallback = start.to_path_buf();
+        let mut cur = Some(start.to_path_buf());
+        while let Some(d) = cur.take() {
             let claude = d.join(".claude");
             if claude.join("FOLLOWUPS.md").is_file() {
                 return Self::under(claude);
             }
-            // Repo boundary: a `.git` here with no log above means the log simply
-            // doesn't exist for THIS repo — don't climb into an outer repo's.
-            if d.join(".git").exists() {
+            let dotgit = d.join(".git");
+            if dotgit.is_file() {
+                // Linked worktree: `.git` is a gitdir pointer file, and the
+                // repo's one canonical log lives in the MAIN working tree's
+                // `.claude` — jump there and keep looking (also re-aim the
+                // first-run fallback so `add` from a worktree can't split-brain
+                // the log into the worktree's own `.claude`).
+                if let Some(main) = main_worktree_dir(&d, &dotgit) {
+                    fallback = main.clone();
+                    cur = Some(main);
+                    continue;
+                }
                 break;
             }
-            cur = d.parent();
+            // Repo boundary: a `.git` here with no log above means the log simply
+            // doesn't exist for THIS repo — don't climb into an outer repo's.
+            if dotgit.exists() {
+                break;
+            }
+            cur = d.parent().map(Path::to_path_buf);
         }
-        Self::under(start.join(".claude"))
+        Self::under(fallback.join(".claude"))
     }
+}
+
+/// Main working tree of the linked worktree whose `.git` pointer file is
+/// `dotgit`: parse `gitdir: <path>/.git/worktrees/<name>` (relative paths
+/// resolve against the worktree root `wt_root`) and return `<path>`.
+fn main_worktree_dir(wt_root: &Path, dotgit: &Path) -> Option<PathBuf> {
+    let content = fs::read_to_string(dotgit).ok()?;
+    let gitdir = content.strip_prefix("gitdir:")?.trim();
+    let gitdir = if Path::new(gitdir).is_absolute() {
+        PathBuf::from(gitdir)
+    } else {
+        wt_root.join(gitdir)
+    };
+    // Climb to the `.git` component; the main tree is its parent.
+    let mut anc = gitdir.as_path();
+    while let Some(parent) = anc.parent() {
+        if anc.file_name().is_some_and(|n| n == ".git") {
+            // Normalize `wt/../main`-style relative joins; fall back to the
+            // lexical path when the dir is gone (caller just misses the log).
+            return Some(fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()));
+        }
+        anc = parent;
+    }
+    None
 }
 
 fn mtime(p: &Path) -> i64 {
