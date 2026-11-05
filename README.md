@@ -17,6 +17,7 @@
 
 ```
 mpm list --status open               # 分流，不讀全檔
+mpm list --status in-progress        # 哪些正在被某個 branch／PR 修
 mpm show FU-2026-05-23-042            # 單筆 entry
 mpm query pr:498                      # 這個 PR 是否已關掉某 follow-up？
 mpm graph FU-2026-05-23-048 --direction down   # 有什麼 blocked 在這之上？
@@ -65,7 +66,7 @@ cargo install --git https://github.com/coseto6125/markdown-project-manager --bin
 ### 裝進 AI coding agent
 
 `mpm install` 把 mpm 的 skill（教 agent 何時／如何呼叫 `mpm`）交給 coding agent，
-讓它自動在「開 PR 前查 log、過程中記 defer、完成後標 done」三個時機用 `mpm`。
+讓它自動在「開 PR 前查 log、開始修時標進行中、過程中記 defer、PR 合併後標 done」四個時機用 `mpm`。
 skill 內容在編譯時內嵌進 binary，**任何平台、無需 checkout 或網路**。
 
 ```
@@ -92,7 +93,7 @@ mpm install            # 沒有原生 skill 機制的 agent：把 skill 寫成�
 mpm add --category "Parser & Schema" --scope "..." --why "..." --size S --surfaced "PR #520"
 mpm show <id> [--json]
 mpm stub <id>
-mpm list [--status open|done|wontfix] [--category C] [--size S|M|L] [--blocked] [--pr N] [--json]
+mpm list [--status open|in-progress|done|wontfix] [--category C] [--size S|M|L] [--blocked] [--pr N] [--json]
 mpm next-id
 ```
 
@@ -101,6 +102,10 @@ mpm next-id
 ```
 mpm set <id> --field scope --value "..." [--append]
 mpm move <id> --category "CLI / Commands"
+mpm start <id> --branch fix/x            # 開始修：標成由這個分支進行中
+mpm start <id> --pr 520                  # 開 PR 後：改標成由 PR #520 進行中
+mpm stop <id>                            # 放棄：拿掉進行中標記
+mpm done <id>                            # 用 start 記下的 PR / 分支結案
 mpm done <id> --pr 520 [--commit abc1234] [--note "..."]
 mpm done <id> --branch feat/x --commit abc1234
 mpm wontfix <id> --reason "..."
@@ -127,8 +132,8 @@ mpm validate                           # dangling 連結、重複 id
 |---|---|
 | Entry | `id` + `category` + `status` + 6 個核心欄位（owner/scope/why-deferred/next-action/size/links）+ 有序的額外欄位 |
 | 欄位順序 | 逐筆 verbatim 保留（`original-scope` 原樣 round-trip 成 `original-scope`，一次性的鍵保留原位） |
-| Status | `open` · `done` · `wontfix` · `blocked`（留在 open）· `superseded` |
-| Edges | `blocked-on`、`links-to`（來自 `[[FU-id]]`）、`superseded-by`、`carried-over-from`、`done-in-PR`、`surfaced-in-PR` |
+| Status | `open` · `in-progress`（留在 open，由 `in-progress: PR #N` / `branch X` 欄位推出，優先於 blocked）· `done` · `wontfix` · `blocked`（留在 open）· `superseded` |
+| Edges | `blocked-on`、`links-to`（來自 `[[FU-id]]`）、`superseded-by`、`carried-over-from`、`done-in-PR`、`surfaced-in-PR`、`in-progress-in`（PR 或分支；`query pr:N` 也會比對到）|
 | 渲染 | canonical 形式；第一次 `import` + render 是一次性正規化，之後 byte-stable |
 
 ## 授權

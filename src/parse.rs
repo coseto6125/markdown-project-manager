@@ -385,6 +385,12 @@ fn derive_edges(entry: &mut Entry) {
             entry.edges.push(Edge::BlockedOn(target));
         }
     }
+    // A resolved entry is never in progress, even when an old mpm left the marker.
+    if entry.resolution.is_none() && entry.location == Location::Open {
+        if let Some(w) = work_ref(entry) {
+            entry.edges.push(Edge::InProgressIn(w));
+        }
+    }
     // Resolution-derived edges.
     if let Some(r) = &entry.resolution {
         match r.kind {
@@ -420,9 +426,30 @@ fn set_status_from_resolution(entry: &mut Entry) {
             ResKind::Wontfix => Status::Wontfix,
             ResKind::Superseded => Status::Superseded,
         };
-    } else if entry.edges.iter().any(|e| matches!(e, Edge::BlockedOn(_))) {
-        entry.status = Status::Blocked;
+    } else if entry.location == Location::Open {
+        entry.status = if in_progress_value(entry).is_some() {
+            Status::InProgress
+        } else if entry.edges.iter().any(|e| matches!(e, Edge::BlockedOn(_))) {
+            Status::Blocked
+        } else {
+            Status::Open
+        };
     }
+}
+
+/// The raw `in-progress` field value, if the entry carries one.
+pub fn in_progress_value(entry: &Entry) -> Option<&str> {
+    entry
+        .extra
+        .iter()
+        .find(|(k, _)| k == IN_PROGRESS_KEY)
+        .map(|(_, v)| v.as_str())
+}
+
+/// The PR or branch the `in-progress` field names. `None` when the field is
+/// absent or malformed.
+pub fn work_ref(entry: &Entry) -> Option<WorkRef> {
+    in_progress_value(entry).and_then(WorkRef::parse)
 }
 
 fn field_values(entry: &Entry) -> Vec<(String, String)> {

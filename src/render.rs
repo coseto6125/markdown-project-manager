@@ -69,7 +69,7 @@ fn render_open(store: &Store) -> String {
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         for e in &entries {
             out.push('\n');
-            out.push_str(&render_entry(e, Location::Open));
+            out.push_str(&render_entry(e));
         }
     }
     out
@@ -88,7 +88,7 @@ fn render_done(store: &Store) -> String {
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     for e in &entries {
         out.push('\n');
-        out.push_str(&render_entry(e, Location::Done));
+        out.push_str(&render_entry(e));
     }
     out
 }
@@ -128,7 +128,7 @@ fn ordered_categories(store: &Store, location: Location) -> Vec<String> {
 }
 
 /// Render one entry's heading + ordered field block.
-fn render_entry(entry: &Entry, location: Location) -> String {
+fn render_entry(entry: &Entry) -> String {
     let mut out = String::new();
     out.push_str("### ");
     out.push_str(&entry.id);
@@ -136,12 +136,11 @@ fn render_entry(entry: &Entry, location: Location) -> String {
         out.push_str(MIDDOT);
         out.push_str(&entry.provenance);
     }
-    // DONE entries re-append the resolution segment to the heading.
-    if location == Location::Done {
-        if let Some(seg) = heading_resolution_segment(entry) {
-            out.push_str(MIDDOT);
-            out.push_str(&seg);
-        }
+    // A resolved entry re-appends the resolution segment to the heading, also
+    // when a hand edit left it in the Open file: dropping it would reopen the entry.
+    if let Some(seg) = heading_resolution_segment(entry) {
+        out.push_str(MIDDOT);
+        out.push_str(&seg);
     }
     out.push('\n');
 

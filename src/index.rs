@@ -48,7 +48,9 @@ impl Index {
     fn add_edge(&mut self, src: usize, edge: &Edge) {
         match edge {
             Edge::DoneInPr { pr, .. } => self.by_pr.entry(*pr).or_default().push(src),
-            Edge::SurfacedInPr(pr) => self.by_pr.entry(*pr).or_default().push(src),
+            Edge::SurfacedInPr(pr) | Edge::InProgressIn(WorkRef::Pr(pr)) => {
+                self.by_pr.entry(*pr).or_default().push(src)
+            }
             Edge::BlockedOn(id) => match self.by_id.get(id).copied() {
                 Some(t) => {
                     self.blocked_on.entry(src).or_default().push(t);
@@ -76,7 +78,10 @@ impl Index {
                 }
                 None => self.dangling.push((src, id.clone())),
             },
-            Edge::Supersedes(_) | Edge::DoneInBranch { .. } | Edge::Wontfix { .. } => {}
+            Edge::Supersedes(_)
+            | Edge::DoneInBranch { .. }
+            | Edge::Wontfix { .. }
+            | Edge::InProgressIn(WorkRef::Branch(_)) => {}
         }
     }
 }

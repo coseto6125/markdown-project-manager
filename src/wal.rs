@@ -23,7 +23,7 @@
 //! committed ops are at-least-once, never lost.
 
 use crate::commands;
-use crate::model::Store;
+use crate::model::{Store, WorkRef};
 use crate::store::{self, Paths};
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -64,6 +64,13 @@ pub enum Op {
         branch: Option<String>,
         commit: Option<String>,
         note: Option<String>,
+    },
+    Start {
+        id: String,
+        work: WorkRef,
+    },
+    Stop {
+        id: String,
     },
     Wontfix {
         id: String,
@@ -119,6 +126,8 @@ pub fn apply_op(store: &mut Store, op: Op) -> Result<String> {
             commit,
             note,
         } => commands::apply_done(store, &id, pr, branch, commit, note),
+        Op::Start { id, work } => commands::apply_start(store, &id, work),
+        Op::Stop { id } => commands::apply_stop(store, &id),
         Op::Wontfix { id, reason } => commands::apply_wontfix(store, &id, reason),
         Op::Supersede { id, by } => commands::apply_supersede(store, &id, &by),
         Op::Block { id, on } => commands::apply_block(store, &id, &on),

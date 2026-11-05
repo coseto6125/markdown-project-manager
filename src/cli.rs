@@ -83,9 +83,10 @@ pub enum Command {
         category: String,
     },
     /// Resolve an entry as done (moves it to the Done archive, leaves a stub).
+    /// Without --pr / --branch it uses the PR or branch `start` recorded.
     Done {
         id: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "branch")]
         pr: Option<u32>,
         #[arg(long)]
         branch: Option<String>,
@@ -94,6 +95,19 @@ pub enum Command {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Mark an entry in progress in the PR or branch fixing it. Run it when the
+    /// work starts (`--branch`) and again when the PR opens (`--pr`); `done`
+    /// without flags then resolves with that PR or branch.
+    Start {
+        id: String,
+        #[arg(long, conflicts_with = "branch", required_unless_present = "branch")]
+        pr: Option<u32>,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Remove the in-progress mark (the work was dropped); the entry returns to
+    /// open, or to blocked when it has blocked-on edges.
+    Stop { id: String },
     /// Resolve an entry as wontfix.
     Wontfix {
         id: String,
@@ -106,7 +120,7 @@ pub enum Command {
         #[arg(long)]
         by: String,
     },
-    /// Add a blocked-on edge (keeps the entry Open, status=blocked).
+    /// Add a blocked-on edge (keeps the entry Open; status=blocked unless it is in progress).
     Block {
         id: String,
         #[arg(long)]

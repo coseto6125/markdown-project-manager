@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Bump on any breaking change to the cached structs; a mismatch forces a
-/// transparent re-import from the markdown.
+/// transparent re-import from the markdown. A new enum variant appended at the
+/// end is not breaking: the cache encodes variants by name (`to_vec_named`).
+/// A bump re-imports, and a re-import drops the `block` / `link` edges that live
+/// only in the cache.
 pub const SCHEMA_VERSION: u16 = 1;
 
 /// The six known core fields. Everything else lands in [`Entry::extra`].
@@ -117,6 +120,9 @@ pub enum Status {
     /// Stays in the Open file; `next-action` notes the dependency.
     Blocked,
     Superseded,
+    /// Stays in the Open file; an `in-progress` field names the PR or branch
+    /// fixing it. Outranks `Blocked`.
+    InProgress,
 }
 
 impl Status {
@@ -127,21 +133,72 @@ impl Status {
             Status::Wontfix => "wontfix",
             Status::Blocked => "blocked",
             Status::Superseded => "superseded",
+            Status::InProgress => "in-progress",
+        }
+    }
+}
+
+/// The field key that marks an entry in progress.
+pub const IN_PROGRESS_KEY: &str = "in-progress";
+
+/// The PR or branch an entry is being fixed in, as written in its
+/// `in-progress` field: `PR #912` or `branch fix/x`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkRef {
+    Pr(u32),
+    Branch(String),
+}
+
+impl WorkRef {
+    /// Parse an `in-progress` field value. `None` for a value in neither form.
+    /// Text after the PR number (`PR #912 (draft)`) is ignored.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if let Some(rest) = value.strip_prefix("PR #") {
+            let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            return rest[..digits].parse().ok().map(WorkRef::Pr);
+        }
+        value.strip_prefix("branch ").and_then(Self::branch)
+    }
+
+    /// A branch marker. `None` for an empty name or one with whitespace, which
+    /// no git branch has.
+    pub fn branch(name: &str) -> Option<Self> {
+        let name = name.trim();
+        (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| WorkRef::Branch(name.to_string()))
+    }
+}
+
+impl std::fmt::Display for WorkRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkRef::Pr(pr) => write!(f, "PR #{pr}"),
+            WorkRef::Branch(b) => write!(f, "branch {b}"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Edge {
-    DoneInPr { pr: u32, commit: Option<String> },
-    DoneInBranch { branch: String, commit: Option<String> },
-    Wontfix { reason: String },
+    DoneInPr {
+        pr: u32,
+        commit: Option<String>,
+    },
+    DoneInBranch {
+        branch: String,
+        commit: Option<String>,
+    },
+    Wontfix {
+        reason: String,
+    },
     BlockedOn(String),
     SupersededBy(String),
     Supersedes(String),
     LinksTo(String),
     CarriedOverFrom(String),
     SurfacedInPr(u32),
+    /// Derived from the `in-progress` field.
+    InProgressIn(WorkRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
