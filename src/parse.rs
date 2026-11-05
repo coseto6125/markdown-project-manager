@@ -470,8 +470,11 @@ pub fn remove_blocked_mentions(text: &str, on: Option<&str>) -> Option<String> {
             tail += 1;
         }
         out.replace_range(start..range.end + tail, "");
+        // Only a removal that reached the end leaves whitespace to trim.
+        if start == out.len() {
+            out.truncate(out.trim_end().len());
+        }
     }
-    out.truncate(out.trim_end().len());
     removed.then_some(out)
 }
 

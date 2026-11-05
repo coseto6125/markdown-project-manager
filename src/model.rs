@@ -474,13 +474,20 @@ pub fn split_comments(value: &str) -> (&str, &str) {
 
 /// Where [`split_comments`] cuts `value`. The first line is never a
 /// trailing comment: it is the field's own text.
+/// One `<!-- … -->` comment and nothing else on the trimmed line `t`.
+fn is_comment_line(t: &str) -> bool {
+    t.strip_prefix("<!--")
+        .and_then(|rest| rest.find("-->"))
+        .is_some_and(|close| close + "<!--".len() + "-->".len() == t.len())
+}
+
 fn trailing_comments_start(value: &str) -> usize {
     let mut end = value.len();
     let mut commented = false;
     for line in value.rsplit('\n') {
         let start = end - line.len();
         let t = line.trim();
-        if start == 0 || !(t.is_empty() || t.starts_with("<!--") && t.ends_with("-->")) {
+        if start == 0 || !(t.is_empty() || is_comment_line(t)) {
             break;
         }
         commented |= !t.is_empty();

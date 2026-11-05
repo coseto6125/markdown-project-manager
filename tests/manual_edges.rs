@@ -934,3 +934,21 @@ fn test_cache_written_by_0_2_0_with_a_mention_in_a_comment_reads_open() {
     assert_eq!(e.status, Status::Open, "0.2.0 cached it as blocked");
     assert!(blocked_on(&e).is_empty());
 }
+
+#[test]
+fn test_unblock_keeps_the_trailing_spaces_of_another_line() {
+    let e = unblock_next_action("na_hard_break", &format!("blocked: {B}\nkeep this line  "), Some(B));
+    assert_eq!(e.core.next_action.as_deref(), Some("keep this line  "));
+}
+
+#[test]
+fn test_set_after_a_line_with_text_between_two_comments_keeps_that_line_in_its_field() {
+    let line = "<!-- note --> manages release <!-- end -->";
+    let body = entry_md(A, &[("scope", "s"), ("owner", "Alice")]).replacen("\n\n", &format!("\n{line}\n\n"), 1)
+        + &entry_md(B, &[("owner", "x")]);
+    let p = seed_md("comment_text", &body, "");
+    set(&p, A, "size", "M", false);
+    let e = reimport(&p, A);
+    assert_eq!(e.core.owner.as_deref(), Some(format!("Alice\n{line}").as_str()));
+    assert_eq!(e.core.size.as_deref(), Some("M"));
+}
