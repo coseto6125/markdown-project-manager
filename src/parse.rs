@@ -145,7 +145,7 @@ fn parse_entry(lines: &[&str], start: usize, heading: &str, location: Location, 
     }
 
     derive_edges(&mut entry);
-    set_status_from_resolution(&mut entry);
+    derive_status(&mut entry);
     (entry, i)
 }
 
@@ -342,7 +342,7 @@ fn store_field(entry: &mut Entry, key: &str, value: String) {
 pub fn rebuild_entry_edges(entry: &mut Entry) {
     entry.edges.clear();
     derive_edges(entry);
-    set_status_from_resolution(entry);
+    derive_status(entry);
 }
 
 /// Upgrade an entry from a [`FIELDLESS_EDGES_VERSION`] cache. Such a cache
@@ -381,7 +381,7 @@ pub fn list_field_ids<'e>(entry: &'e Entry, key: &str) -> Vec<&'e str> {
         .extra
         .iter()
         .filter(|(k, _)| k == key)
-        .flat_map(|(_, v)| v.split(LIST_SEPARATORS))
+        .flat_map(|(_, v)| own_text(v).split(LIST_SEPARATORS))
         .filter_map(list_item_id)
         .collect()
 }
@@ -403,6 +403,79 @@ pub fn remove_list_item(value: &str, id: &str) -> Option<String> {
         false => kept,
     };
     Some(kept.to_string())
+}
+
+/// The `next-action` mention `derive_edges` reads as a block: the first
+/// `blocked: ` (else `blocked-on `) that starts a word, when an `FU-` id
+/// follows it. Returns the id and the byte range from the phrase through the
+/// id and the `]` brackets that close it.
+fn blocked_mention(text: &str) -> Option<(&str, std::ops::Range<usize>)> {
+    ["blocked: ", "blocked-on "].into_iter().find_map(|needle| {
+        let at = text
+            .match_indices(needle)
+            .map(|(i, _)| i)
+            .find(|&i| !text[..i].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '-'))?;
+        let after = at + needle.len();
+        let id = fu_id_at(text, after)?;
+        let opened = text[after..id.start].matches('[').count();
+        let closed = text[id.end..].chars().take_while(|&c| c == ']').count().min(opened);
+        Some((&text[id.clone()], at..id.end + closed))
+    })
+}
+
+/// The byte range of the `FU-` id at `from`, after any `[` and spaces.
+fn fu_id_at(text: &str, from: usize) -> Option<std::ops::Range<usize>> {
+    let at = text.len() - text[from..].trim_start_matches(['[', ' ']).len();
+    let len = text[at..]
+        .find(|c: char| !crate::id::is_id_char(c))
+        .unwrap_or(text.len() - at);
+    crate::id::is_valid(&text[at..at + len]).then_some(at..at + len)
+}
+
+/// `text` without the mentions `derive_edges` reads as a block on `on` (on
+/// any id when `None`), or `None` when it reads none. A removal also takes
+/// the separator and spaces after the mention (else the separator and
+/// spaces before it), and its line when the mention is the whole line: `see
+/// blocked: FU-x, first` becomes `see first`. An id that a comma and another
+/// id follow leaves the phrase to that id: `blocked: FU-x, FU-y` becomes
+/// `blocked: FU-y`. The next mention then becomes the block, as a re-import reads it.
+pub fn remove_blocked_mentions(text: &str, on: Option<&str>) -> Option<String> {
+    let mut out = text.to_string();
+    let mut removed = false;
+    while let Some((id, range)) = blocked_mention(&out) {
+        if on.is_some_and(|t| t != id) {
+            break;
+        }
+        removed = true;
+        let rest = &out[range.end..];
+        let next = rest
+            .trim_start_matches(' ')
+            .trim_start_matches(LIST_SEPARATORS)
+            .trim_start_matches(' ');
+        let mut tail = rest.len() - next.len();
+        let start = if tail == 0 {
+            let before = out[..range.start].trim_end_matches(' ');
+            before
+                .strip_suffix(LIST_SEPARATORS)
+                .unwrap_or(before)
+                .trim_end_matches(' ')
+                .len()
+        } else if rest.trim_start_matches(' ').starts_with(',') && fu_id_at(next, 0).is_some() {
+            range.start + out[range.start..].find(' ').map_or(0, |i| i + 1)
+        } else {
+            range.start
+        };
+        let whole_line = start == 0 || out[..start].ends_with('\n');
+        if whole_line && out[range.end + tail..].starts_with('\n') {
+            tail += 1;
+        }
+        out.replace_range(start..range.end + tail, "");
+        // Only a removal that reached the end leaves whitespace to trim.
+        if start == out.len() {
+            out.truncate(out.trim_end().len());
+        }
+    }
+    removed.then_some(out)
 }
 
 fn owned_ids(entry: &Entry, key: &str) -> Vec<String> {
@@ -437,8 +510,8 @@ fn derive_edges(entry: &mut Entry) {
     }
     // `blocked: FU-…` mentions in next-action keep the entry in Open.
     if let Some(na) = &entry.core.next_action {
-        if let Some(target) = find_fu_after(na, "blocked: ").or_else(|| find_fu_after(na, "blocked-on ")) {
-            entry.edges.push(Edge::BlockedOn(target));
+        if let Some((target, _)) = blocked_mention(own_text(na)) {
+            entry.edges.push(Edge::BlockedOn(target.to_string()));
         }
     }
     for target in owned_ids(entry, BLOCKED_ON_KEY) {
@@ -478,7 +551,10 @@ fn derive_edges(entry: &mut Entry) {
     }
 }
 
-fn set_status_from_resolution(entry: &mut Entry) {
+/// Set `entry.status` from the whole entry: its resolution, then its location,
+/// then an `in-progress` field, then a `BlockedOn` edge. Call it after the
+/// edges are derived.
+fn derive_status(entry: &mut Entry) {
     if let Some(r) = &entry.resolution {
         entry.status = match r.kind {
             ResKind::Done => Status::Done,
@@ -498,13 +574,14 @@ fn set_status_from_resolution(entry: &mut Entry) {
     }
 }
 
-/// The raw `in-progress` field value, if the entry carries one.
+/// The `in-progress` field value without its trailing comments, if the entry
+/// carries one.
 pub fn in_progress_value(entry: &Entry) -> Option<&str> {
     entry
         .extra
         .iter()
         .find(|(k, _)| k == IN_PROGRESS_KEY)
-        .map(|(_, v)| v.as_str())
+        .map(|(_, v)| own_text(v))
 }
 
 /// The PR or branch the `in-progress` field names. `None` when the field is
@@ -535,12 +612,7 @@ fn first_pr(haystack: &str) -> Option<u32> {
 
 fn find_fu_after(haystack: &str, needle: &str) -> Option<String> {
     let idx = haystack.find(needle)? + needle.len();
-    let rest = haystack[idx..].trim_start_matches(['[', ' ']);
-    let id: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    (id.starts_with("FU-")).then_some(id)
+    fu_id_at(haystack, idx).map(|id| haystack[id].to_string())
 }
 
 /// Collect `[[FU-id]]` targets from text. Each `]]` pairs with the nearest

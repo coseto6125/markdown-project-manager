@@ -41,7 +41,12 @@ pub fn mint_with(date: &str, nanos: u128, pid: u32) -> String {
 /// ASCII letters, digits and `-`.
 pub fn is_valid(id: &str) -> bool {
     id.strip_prefix("FU-")
-        .is_some_and(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .is_some_and(|tail| !tail.is_empty() && tail.chars().all(is_id_char))
+}
+
+/// A character an id may hold after its `FU-` prefix.
+pub fn is_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
 }
 
 /// Live mint: today's date + the current creation nanos + this process's pid.

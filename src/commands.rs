@@ -535,6 +535,13 @@ fn remove_extra(entry: &mut Entry, drop: impl Fn(usize, &str, &str) -> bool) -> 
     if kept == new_index.len() {
         return false;
     }
+    let comments: String = entry
+        .extra
+        .iter()
+        .zip(&new_index)
+        .filter(|(_, n)| n.is_none())
+        .map(|((_, v), _)| split_comments(v).1)
+        .collect();
     let mut keep = new_index.iter().map(Option::is_some);
     entry.extra.retain(|_| keep.next().unwrap_or(true));
     entry.field_order.retain_mut(|f| match f {
@@ -548,6 +555,7 @@ fn remove_extra(entry: &mut Entry, drop: impl Fn(usize, &str, &str) -> bool) -> 
         },
         _ => true,
     });
+    entry.keep_trailing_comments(&comments);
     true
 }
 
@@ -597,18 +605,27 @@ pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<St
     let i = find(store, id)?;
     let e = &mut store.entries[i];
     drop_blocked_on(e, on);
+    drop_blocked_mentions(e, on);
     rebuild_edges(e);
-    // A `blocked: FU-x` in next-action has no field to edit, so its edge is
-    // dropped in memory only and comes back on the next re-derive.
-    e.edges.retain(|edge| match (edge, on) {
-        (Edge::BlockedOn(t), Some(target)) => t != target,
-        (Edge::BlockedOn(_), None) => false,
-        _ => true,
-    });
-    if e.status == Status::Blocked && !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(_))) {
-        e.status = Status::Open;
-    }
     Ok(id.to_string())
+}
+
+/// Drop the `blocked: FU-x` mentions of `on` (every id when `None`) from
+/// `next-action`, so the markdown derives no block from them. A `next-action`
+/// left with no letter or digit is removed, not kept as bare punctuation.
+fn drop_blocked_mentions(e: &mut Entry, on: Option<&str>) {
+    let Some(text) = e.core.next_action.take() else {
+        return;
+    };
+    let (own, comments) = split_comments(&text);
+    let Some(kept) = crate::parse::remove_blocked_mentions(own, on) else {
+        e.core.next_action = Some(text);
+        return;
+    };
+    match kept.chars().any(char::is_alphanumeric) {
+        true => e.core.next_action = Some(kept + comments),
+        false => e.keep_trailing_comments(comments),
+    }
 }
 
 /// Drop `on` (every id when `None`) from each `blocked-on` field. Other items
@@ -620,11 +637,12 @@ fn drop_blocked_on(e: &mut Entry, on: Option<&str>) {
             if k != BLOCKED_ON_KEY {
                 continue;
             }
-            if let Some(kept) = crate::parse::remove_list_item(v, target) {
+            let (own, comments) = split_comments(v);
+            if let Some(kept) = crate::parse::remove_list_item(own, target) {
                 if kept.is_empty() {
                     emptied.push(i);
                 }
-                *v = kept;
+                *v = kept + comments;
             }
         }
     }
@@ -800,7 +818,7 @@ fn query(paths: &Paths, filters: &[String], json: bool) -> Result<()> {
                     .core
                     .owner
                     .as_deref()
-                    .map(|o| o.contains(val))
+                    .map(|o| own_text(o).contains(val))
                     .unwrap_or(false)
             }),
             other => bail!("unknown filter key `{other}`"),
@@ -890,15 +908,7 @@ fn validate(paths: &Paths, json: bool) -> Result<()> {
 }
 
 fn parse_status(s: &str) -> Result<Status> {
-    Ok(match s {
-        "open" => Status::Open,
-        "done" => Status::Done,
-        "wontfix" => Status::Wontfix,
-        "blocked" => Status::Blocked,
-        "superseded" => Status::Superseded,
-        "in-progress" => Status::InProgress,
-        other => bail!("unknown status `{other}`"),
-    })
+    s.parse().map_err(anyhow::Error::msg)
 }
 
 /// Recompute every edge and the status from the entry's fields after a field
