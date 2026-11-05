@@ -144,6 +144,7 @@ fn render_entry(entry: &Entry) -> String {
     }
     out.push('\n');
 
+    let mut rendered_field = false;
     for fref in &entry.field_order {
         let (key, value) = match fref {
             FieldRef::Core(k) => match entry.core.slot(k).and_then(|s| s.as_ref()) {
@@ -160,6 +161,15 @@ fn render_entry(entry: &Entry) -> String {
             },
         };
         out.push_str(&format!("- **{key}**: {value}\n"));
+        rendered_field = true;
+    }
+    if !entry.trailing_comments.is_empty() {
+        // The comments carry their own leading newline: they continue the last field's line.
+        if rendered_field {
+            out.pop();
+        }
+        out.push_str(&entry.trailing_comments);
+        out.push('\n');
     }
     out
 }

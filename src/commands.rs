@@ -208,6 +208,7 @@ pub fn apply_add(
         extra: Vec::new(),
         field_order: Vec::new(),
         edges: Vec::new(),
+        trailing_comments: String::new(),
         resolution: None,
     };
     // Canonical field order for a fresh entry.
@@ -597,18 +598,24 @@ pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<St
     let i = find(store, id)?;
     let e = &mut store.entries[i];
     drop_blocked_on(e, on);
+    drop_blocked_mentions(e, on);
     rebuild_edges(e);
-    // A `blocked: FU-x` in next-action has no field to edit, so its edge is
-    // dropped in memory only and comes back on the next re-derive.
-    e.edges.retain(|edge| match (edge, on) {
-        (Edge::BlockedOn(t), Some(target)) => t != target,
-        (Edge::BlockedOn(_), None) => false,
-        _ => true,
-    });
-    if e.status == Status::Blocked && !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(_))) {
-        e.status = Status::Open;
-    }
     Ok(id.to_string())
+}
+
+/// Drop the `blocked: FU-x` mentions of `on` (every id when `None`) from
+/// `next-action`, so the markdown derives no block from them. A `next-action`
+/// left with no letter or digit is removed, not kept as bare punctuation.
+fn drop_blocked_mentions(e: &mut Entry, on: Option<&str>) {
+    let Some(kept) = e
+        .core
+        .next_action
+        .as_deref()
+        .and_then(|text| crate::parse::remove_blocked_mentions(text, on))
+    else {
+        return;
+    };
+    e.core.next_action = kept.chars().any(char::is_alphanumeric).then_some(kept);
 }
 
 /// Drop `on` (every id when `None`) from each `blocked-on` field. Other items
@@ -890,15 +897,7 @@ fn validate(paths: &Paths, json: bool) -> Result<()> {
 }
 
 fn parse_status(s: &str) -> Result<Status> {
-    Ok(match s {
-        "open" => Status::Open,
-        "done" => Status::Done,
-        "wontfix" => Status::Wontfix,
-        "blocked" => Status::Blocked,
-        "superseded" => Status::Superseded,
-        "in-progress" => Status::InProgress,
-        other => bail!("unknown status `{other}`"),
-    })
+    s.parse().map_err(anyhow::Error::msg)
 }
 
 /// Recompute every edge and the status from the entry's fields after a field

@@ -527,3 +527,261 @@ fn test_schema_1_upgrade_and_reimport_agree_on_a_done_file_entry_with_no_resolut
     assert_eq!(load(&p, DDD).status, Status::Done);
     assert_eq!(reimport(&p, DDD).status, Status::Done);
 }
+
+/// Seed a log from entry markdown, so a test controls every field byte.
+fn seed_md(tag: &str, open_body: &str, done_body: &str) -> Paths {
+    let dir = seed_dir(tag);
+    fs::write(
+        dir.join("FOLLOWUPS.md"),
+        format!("# Follow-ups · Open\n\n## CLI / Commands\n\n{open_body}"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("FOLLOWUPS_DONE.md"),
+        format!("# Follow-ups · Done archive\n\n## CLI / Commands\n\n{done_body}"),
+    )
+    .unwrap();
+    Paths::resolve(Some(&dir))
+}
+
+fn entry_md(id: &str, fields: &[(&str, &str)]) -> String {
+    let mut out = format!("### {id}  ·  surfaced in PR #1\n");
+    for (key, value) in fields {
+        out.push_str(&format!("- **{key}**: {value}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// A, B and C where A's next-action is `next_action`.
+fn three_entries(next_action: &str) -> String {
+    let plain = [("owner", "unassigned"), ("scope", "s")];
+    entry_md(A, &[("owner", "unassigned"), ("scope", "s"), ("next-action", next_action)])
+        + &entry_md(B, &plain)
+        + &entry_md(C, &plain)
+}
+
+/// Unblock A on a log whose A has `next_action`, then re-import from markdown alone.
+fn unblock_next_action(tag: &str, next_action: &str, on: Option<&str>) -> Entry {
+    let p = seed_md(tag, &three_entries(next_action), "");
+    assert_eq!(load(&p, A).status, Status::Blocked, "the mention blocks A before the unblock");
+    unblock(&p, A, on);
+    reimport(&p, A)
+}
+
+#[test]
+fn test_unblock_of_a_next_action_block_then_reimport_is_open() {
+    let e = unblock_next_action("na_block", &format!("blocked: {B}; fix parser"), None);
+    assert_eq!(e.status, Status::Open);
+    assert!(blocked_on(&e).is_empty());
+    assert_eq!(e.core.next_action.as_deref(), Some("fix parser"));
+}
+
+#[test]
+fn test_unblock_on_one_of_two_next_action_mentions_keeps_the_other_block() {
+    let p = seed_md("na_two", &three_entries(&format!("blocked: {B}, then blocked: {C}")), "");
+    unblock(&p, A, Some(B));
+    let e = reimport(&p, A);
+    assert_eq!(e.core.next_action.as_deref(), Some(format!("then blocked: {C}").as_str()));
+    assert_eq!(e.status, Status::Blocked);
+    assert_eq!(blocked_on(&e), vec![C]);
+    unblock(&p, A, Some(C));
+    let e = reimport(&p, A);
+    assert_eq!(e.core.next_action.as_deref(), Some("then"));
+    assert_eq!(e.status, Status::Open);
+}
+
+#[test]
+fn test_unblock_of_an_id_named_in_next_action_and_blocked_on_clears_both() {
+    let p = seed_md("na_and_field", &three_entries("go"), "");
+    block(&p, A, B);
+    set(&p, A, "next-action", &format!("blocked: {B}"), false);
+    unblock(&p, A, Some(B));
+    let e = reimport(&p, A);
+    assert_eq!(e.status, Status::Open);
+    assert!(blocked_on(&e).is_empty());
+    assert!(!open_md(&p).contains("- **blocked-on**:"));
+    assert!(!open_md(&p).contains("blocked:"));
+}
+
+#[test]
+fn test_unblock_when_next_action_is_only_the_mention_removes_the_field() {
+    let p = seed_md("na_only", &three_entries(&format!("blocked: {B}")), "");
+    unblock(&p, A, None);
+    assert!(!section(&p, A).iter().any(|l| l.starts_with("- **next-action**")));
+    let e = reimport(&p, A);
+    assert_eq!(e.core.next_action, None);
+    assert_eq!(e.status, Status::Open);
+}
+
+#[test]
+fn test_unblock_when_only_punctuation_is_left_removes_the_field() {
+    for (tag, text) in [
+        ("na_parens", format!("(blocked: {B})")),
+        ("na_spaces", format!("blocked: {B} ;  ")),
+        ("na_bracket", format!("blocked: [{B}]")),
+    ] {
+        let p = seed_md(tag, &three_entries(&text), "");
+        unblock(&p, A, None);
+        assert_eq!(reimport(&p, A).core.next_action, None, "{text}");
+    }
+}
+
+#[test]
+fn test_unblock_with_an_absent_next_action_still_clears_the_blocked_on_field() {
+    let p = seed_md(
+        "na_absent",
+        &(entry_md(A, &[("owner", "x"), ("blocked-on", B)]) + &entry_md(B, &[("owner", "x")])),
+        "",
+    );
+    unblock(&p, A, None);
+    let e = reimport(&p, A);
+    assert_eq!(e.core.next_action, None);
+    assert_eq!(e.status, Status::Open);
+    assert!(!open_md(&p).contains("next-action"));
+}
+
+#[test]
+fn test_unblock_with_an_empty_next_action_leaves_it_unchanged() {
+    let p = seed_md("na_empty", &three_entries(""), "");
+    let before = load(&p, A).core.next_action;
+    block(&p, A, B);
+    unblock(&p, A, None);
+    assert_eq!(reimport(&p, A).core.next_action, before);
+}
+
+#[test]
+fn test_unblock_of_the_same_id_mentioned_twice_removes_both() {
+    let e = unblock_next_action("na_twice", &format!("blocked: {B}; fix; blocked-on {B}"), Some(B));
+    assert_eq!(e.core.next_action.as_deref(), Some("fix"));
+    assert_eq!(e.status, Status::Open);
+}
+
+#[test]
+fn test_unblock_on_an_id_the_next_action_does_not_name_changes_nothing() {
+    let text = format!("blocked: {B}; fix parser");
+    let p = seed_md("na_miss", &three_entries(&text), "");
+    unblock(&p, A, Some(C));
+    let e = reimport(&p, A);
+    assert_eq!(e.core.next_action.as_deref(), Some(text.as_str()));
+    assert_eq!(e.status, Status::Blocked);
+    assert_eq!(blocked_on(&e), vec![B]);
+}
+
+#[test]
+fn test_unblock_of_a_resolved_entry_cleans_next_action_and_stays_done() {
+    let done = format!(
+        "### {A}  ·  surfaced in PR #1  ·  ✅ done in PR #2\n- **owner**: x\n- **next-action**: blocked: {B}; later\n\n"
+    );
+    let p = seed_md("na_resolved", &entry_md(B, &[("owner", "x")]), &done);
+    unblock(&p, A, None);
+    let e = reimport(&p, A);
+    assert_eq!(e.core.next_action.as_deref(), Some("later"));
+    assert_eq!(e.status, Status::Done);
+    assert!(blocked_on(&e).is_empty());
+}
+
+#[test]
+fn test_unblock_of_an_id_followed_by_a_comma_or_semicolon_drops_the_separator() {
+    for (tag, sep) in [("na_comma", ","), ("na_semi", ";")] {
+        let e = unblock_next_action(tag, &format!("blocked: {B}{sep} then fix"), None);
+        assert_eq!(e.core.next_action.as_deref(), Some("then fix"), "{sep}");
+        assert_eq!(e.status, Status::Open);
+    }
+}
+
+#[test]
+fn test_unblock_on_one_id_of_a_blocked_list_keeps_the_phrase_for_the_other() {
+    let first = unblock_next_action("na_list_first", &format!("blocked: {B}, {C}"), Some(B));
+    assert_eq!(first.core.next_action.as_deref(), Some(format!("blocked: {C}").as_str()));
+    assert_eq!(blocked_on(&first), vec![C]);
+    let second = unblock_next_action("na_list_second", &format!("blocked: {B}, {C}"), Some(C));
+    assert_eq!(second.core.next_action.as_deref(), Some(format!("blocked: {B}").as_str()));
+    assert_eq!(blocked_on(&second), vec![B]);
+    let all = unblock_next_action("na_list_all", &format!("blocked: {B}, {C}"), None);
+    assert_eq!(all.core.next_action, None);
+    assert_eq!(all.status, Status::Open);
+}
+
+#[test]
+fn test_link_appended_after_a_stub_comment_lands_before_the_comment() {
+    let stub = "<!-- FU-2026-09-09-001 → ✅ done in PR #3 -->";
+    let body = entry_md(A, &[("owner", "x"), ("scope", "s")]).replacen("\n\n", &format!("\n{stub}\n\n"), 1)
+        + &entry_md(B, &[("owner", "x")]);
+    let p = seed_md("stub_tail", &body, "");
+    link(&p, A, B);
+    let lines = section(&p, A);
+    let link_at = lines.iter().position(|l| l.starts_with("- **links-to**")).unwrap();
+    let stub_at = lines.iter().position(|l| l == stub).unwrap();
+    assert!(link_at < stub_at, "{lines:?}");
+    assert_eq!(link_at, 2, "right after the last field: {lines:?}");
+}
+
+#[test]
+fn test_render_of_an_entry_with_a_trailing_stub_comment_is_byte_stable() {
+    use markdown_project_manager::parse::parse;
+    let stub = "<!-- FU-2026-09-09-001 → ✅ done in PR #3 -->";
+    let body = entry_md(A, &[("owner", "x"), ("scope", "s\n  continued")]).replacen("\n\n", &format!("\n\n{stub}\n\n"), 1);
+    let open = format!("# Follow-ups · Open\n\n## CLI / Commands\n\n{body}");
+    let first = render::render(&parse(&open, "", (0, 0))).0;
+    assert!(first.contains(&format!("continued\n\n{stub}\n")), "{first}");
+    let second = render::render(&parse(&first, "", (0, 0))).0;
+    assert_eq!(first, second);
+}
+
+/// `source_mtimes` that mpm 0.2.0 stored in `fixtures/v0.2.0-stub/followups.cache`.
+const V020_MTIME: u64 = 1_793_863_412;
+
+/// The log and cache mpm 0.2.0 wrote after `set FU-…bbb --field owner`. Its
+/// cache keeps aaa's trailing stub comment inside aaa's `scope` value.
+fn seed_v020_stub(tag: &str) -> Paths {
+    let dir = seed_dir(tag);
+    for (name, body) in [
+        ("FOLLOWUPS.md", include_str!("fixtures/v0.2.0-stub/FOLLOWUPS.md")),
+        ("FOLLOWUPS_DONE.md", include_str!("fixtures/v0.2.0-stub/FOLLOWUPS_DONE.md")),
+    ] {
+        fs::write(dir.join(name), body).unwrap();
+        set_mtime(&dir.join(name), V020_MTIME);
+    }
+    fs::write(
+        dir.join(".followups.cache"),
+        include_bytes!("fixtures/v0.2.0-stub/followups.cache"),
+    )
+    .unwrap();
+    Paths::resolve(Some(&dir))
+}
+
+#[test]
+fn test_cache_written_by_0_2_0_appends_a_field_before_the_trailing_comment() {
+    const AAA: &str = "FU-2026-01-01-aaa";
+    const BBB: &str = "FU-2026-01-01-bbb";
+    let stub = "<!-- FU-2026-01-01-old → ✅ done in PR #3 -->";
+    let p = seed_v020_stub("v020_stub");
+    link(&p, AAA, BBB);
+    let lines: Vec<String> = section(&p, AAA).into_iter().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines[..2], ["- **owner**: x", "- **scope**: alpha"], "{lines:?}");
+    assert!(lines[2].starts_with("- **links-to**:") && lines[2].contains(BBB), "{lines:?}");
+    assert_eq!(lines[3], stub, "{lines:?}");
+    assert_eq!(reimport(&p, AAA).core.scope.as_deref(), Some("alpha"));
+}
+
+#[test]
+fn test_cache_written_by_0_1_4_with_a_trailing_comment_splits_it_before_migrating() {
+    use markdown_project_manager::parse::split_cached_trailing_comments;
+    let stub = "<!-- FU-2026-01-01-old → ✅ done in PR #3 -->";
+    let open = format!(
+        "# Follow-ups · Open\n\n## Parser\n\n### {A}  ·  surfaced in PR #1\n- **scope**: alpha\n{stub}\n"
+    );
+    let mut store = markdown_project_manager::parse::parse(&open, "", (0, 0));
+    let e = &mut store.entries[0];
+    // The shape a cache older than `trailing_comments` holds.
+    e.core.scope = Some(format!("alpha\n{stub}"));
+    e.trailing_comments.clear();
+    split_cached_trailing_comments(e);
+    assert_eq!(e.core.scope.as_deref(), Some("alpha"));
+    assert_eq!(e.trailing_comments, format!("\n{stub}"));
+    let mut again = e.clone();
+    split_cached_trailing_comments(&mut again);
+    assert_eq!(again.trailing_comments, e.trailing_comments, "idempotent");
+}

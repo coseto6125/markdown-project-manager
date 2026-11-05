@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Bump on any breaking change to the cached structs; a mismatch forces a
 /// transparent re-import from the markdown. A new enum variant appended at the
 /// end is not breaking: the cache encodes variants by name (`to_vec_named`).
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 
 /// The schema before `block` / `link` wrote the `blocked-on` / `links-to`
 /// fields. Its caches hold edges that no field records, so `store::load`
@@ -52,6 +52,11 @@ pub struct Entry {
     pub field_order: Vec<FieldRef>,
     /// Outbound edges; reverse adjacency is built in the index, not stored.
     pub edges: Vec<Edge>,
+    /// Whole-line `<!-- … -->` comments (stubs, notes) that followed the last
+    /// field, kept raw with their leading newline(s) and rendered after every
+    /// field so an appended field lands before them.
+    #[serde(default)]
+    pub trailing_comments: String,
     /// Populated for resolved entries; drives the canonical stub + DONE heading.
     pub resolution: Option<Resolution>,
 }
@@ -129,6 +134,17 @@ pub enum Status {
 }
 
 impl Status {
+    /// Every variant, in display order. `FromStr` and its error message read
+    /// it; `as_str` stays an exhaustive match so a new variant needs a name.
+    pub const ALL: [Status; 6] = [
+        Status::Open,
+        Status::Done,
+        Status::Wontfix,
+        Status::Blocked,
+        Status::Superseded,
+        Status::InProgress,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Status::Open => "open",
@@ -138,6 +154,17 @@ impl Status {
             Status::Superseded => "superseded",
             Status::InProgress => "in-progress",
         }
+    }
+}
+
+impl std::str::FromStr for Status {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter().find(|status| status.as_str() == s).ok_or_else(|| {
+            let valid: Vec<&str> = Self::ALL.iter().map(Status::as_str).collect();
+            format!("unknown status `{s}` (valid: {})", valid.join(", "))
+        })
     }
 }
 

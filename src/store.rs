@@ -91,7 +91,11 @@ pub fn load(paths: &Paths) -> Result<Store> {
                 match store.schema_version {
                     SCHEMA_VERSION => return Ok(store),
                     FIELDLESS_EDGES_VERSION => {
-                        store.entries.iter_mut().for_each(parse::migrate_cache_only_edges);
+                        // Comments first, so a field the migration appends lands before them.
+                        for e in &mut store.entries {
+                            parse::split_cached_trailing_comments(e);
+                            parse::migrate_cache_only_edges(e);
+                        }
                         store.schema_version = SCHEMA_VERSION;
                         return Ok(store);
                     }
