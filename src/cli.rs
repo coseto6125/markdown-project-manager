@@ -126,7 +126,9 @@ pub enum Command {
         #[arg(long)]
         on: String,
     },
-    /// Remove a blocked-on edge (specific target, or all).
+    /// Remove a blocked-on edge (specific target, or all). Also removes the
+    /// `blocked: FU-…` mention of it from next-action; a next-action left
+    /// with no letter or digit is removed.
     Unblock {
         id: String,
         #[arg(long)]

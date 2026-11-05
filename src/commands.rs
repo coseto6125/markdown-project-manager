@@ -208,7 +208,6 @@ pub fn apply_add(
         extra: Vec::new(),
         field_order: Vec::new(),
         edges: Vec::new(),
-        trailing_comments: String::new(),
         resolution: None,
     };
     // Canonical field order for a fresh entry.
@@ -536,6 +535,13 @@ fn remove_extra(entry: &mut Entry, drop: impl Fn(usize, &str, &str) -> bool) -> 
     if kept == new_index.len() {
         return false;
     }
+    let comments: String = entry
+        .extra
+        .iter()
+        .zip(&new_index)
+        .filter(|(_, n)| n.is_none())
+        .map(|((_, v), _)| split_comments(v).1)
+        .collect();
     let mut keep = new_index.iter().map(Option::is_some);
     entry.extra.retain(|_| keep.next().unwrap_or(true));
     entry.field_order.retain_mut(|f| match f {
@@ -549,6 +555,7 @@ fn remove_extra(entry: &mut Entry, drop: impl Fn(usize, &str, &str) -> bool) -> 
         },
         _ => true,
     });
+    entry.keep_trailing_comments(&comments);
     true
 }
 
@@ -607,15 +614,18 @@ pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<St
 /// `next-action`, so the markdown derives no block from them. A `next-action`
 /// left with no letter or digit is removed, not kept as bare punctuation.
 fn drop_blocked_mentions(e: &mut Entry, on: Option<&str>) {
-    let Some(kept) = e
-        .core
-        .next_action
-        .as_deref()
-        .and_then(|text| crate::parse::remove_blocked_mentions(text, on))
-    else {
+    let Some(text) = e.core.next_action.take() else {
         return;
     };
-    e.core.next_action = kept.chars().any(char::is_alphanumeric).then_some(kept);
+    let (own, comments) = split_comments(&text);
+    let Some(kept) = crate::parse::remove_blocked_mentions(own, on) else {
+        e.core.next_action = Some(text);
+        return;
+    };
+    match kept.chars().any(char::is_alphanumeric) {
+        true => e.core.next_action = Some(kept + comments),
+        false => e.keep_trailing_comments(comments),
+    }
 }
 
 /// Drop `on` (every id when `None`) from each `blocked-on` field. Other items
@@ -627,11 +637,12 @@ fn drop_blocked_on(e: &mut Entry, on: Option<&str>) {
             if k != BLOCKED_ON_KEY {
                 continue;
             }
-            if let Some(kept) = crate::parse::remove_list_item(v, target) {
+            let (own, comments) = split_comments(v);
+            if let Some(kept) = crate::parse::remove_list_item(own, target) {
                 if kept.is_empty() {
                     emptied.push(i);
                 }
-                *v = kept;
+                *v = kept + comments;
             }
         }
     }
@@ -807,7 +818,7 @@ fn query(paths: &Paths, filters: &[String], json: bool) -> Result<()> {
                     .core
                     .owner
                     .as_deref()
-                    .map(|o| o.contains(val))
+                    .map(|o| own_text(o).contains(val))
                     .unwrap_or(false)
             }),
             other => bail!("unknown filter key `{other}`"),

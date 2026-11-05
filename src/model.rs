@@ -7,9 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bump on any breaking change to the cached structs; a mismatch forces a
+/// Bump on any breaking change to the cached structs, or to how the parser
+/// derives edges and status from the markdown; a mismatch forces a
 /// transparent re-import from the markdown. A new enum variant appended at the
 /// end is not breaking: the cache encodes variants by name (`to_vec_named`).
+/// 3: field readers skip the comments that end a field value.
 pub const SCHEMA_VERSION: u16 = 3;
 
 /// The schema before `block` / `link` wrote the `blocked-on` / `links-to`
@@ -52,11 +54,6 @@ pub struct Entry {
     pub field_order: Vec<FieldRef>,
     /// Outbound edges; reverse adjacency is built in the index, not stored.
     pub edges: Vec<Edge>,
-    /// Whole-line `<!-- … -->` comments (stubs, notes) that followed the last
-    /// field, kept raw with their leading newline(s) and rendered after every
-    /// field so an appended field lands before them.
-    #[serde(default)]
-    pub trailing_comments: String,
     /// Populated for resolved entries; drives the canonical stub + DONE heading.
     pub resolution: Option<Resolution>,
 }
@@ -161,10 +158,13 @@ impl std::str::FromStr for Status {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::ALL.into_iter().find(|status| status.as_str() == s).ok_or_else(|| {
-            let valid: Vec<&str> = Self::ALL.iter().map(Status::as_str).collect();
-            format!("unknown status `{s}` (valid: {})", valid.join(", "))
-        })
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == s)
+            .ok_or_else(|| {
+                let valid: Vec<&str> = Self::ALL.iter().map(Status::as_str).collect();
+                format!("unknown status `{s}` (valid: {})", valid.join(", "))
+            })
     }
 }
 
@@ -378,29 +378,74 @@ impl Entry {
     /// Set a field: a core slot, an existing extra key, or a new extra key at the
     /// end. `append` joins onto a non-empty value with `"; "`.
     pub fn set_field(&mut self, key: &str, value: String, append: bool) {
-        let merge = |existing: Option<String>, value: String| match existing {
-            Some(cur) if append && !cur.is_empty() => format!("{cur}{LIST_JOIN}{value}"),
-            _ => value,
+        let last_before = self.last_rendered();
+        // The comments that end a field's value stay at its end.
+        let merge = |existing: Option<String>, value: String| {
+            let Some(mut cur) = existing else {
+                return value;
+            };
+            let tail = cur.split_off(trailing_comments_start(&cur));
+            match append && !cur.is_empty() {
+                true => format!("{cur}{LIST_JOIN}{value}{tail}"),
+                false => value + &tail,
+            }
         };
         if CORE_KEYS.contains(&key) {
-            let slot = self.core.slot_mut(key).expect("CORE_KEYS has a slot");
-            *slot = Some(merge(slot.take(), value));
-            if !self
+            let listed = self
                 .field_order
                 .iter()
-                .any(|f| matches!(f, FieldRef::Core(k) | FieldRef::CoreAlias { slot: k, .. } if k == key))
-            {
+                .any(|f| matches!(f, FieldRef::Core(k) | FieldRef::CoreAlias { slot: k, .. } if k == key));
+            let slot = self.core.slot_mut(key).expect("CORE_KEYS has a slot");
+            *slot = Some(merge(slot.take(), value));
+            if !listed {
                 self.field_order.push(FieldRef::Core(key.to_string()));
             }
-            return;
-        }
-        if let Some(pos) = self.extra.iter().position(|(k, _)| k == key) {
+        } else if let Some(pos) = self.extra.iter().position(|(k, _)| k == key) {
             let cur = std::mem::take(&mut self.extra[pos].1);
             self.extra[pos].1 = merge(Some(cur), value);
+        } else {
+            self.extra.push((key.to_string(), value));
+            self.field_order.push(FieldRef::Extra(self.extra.len() - 1));
+        }
+        // The parser keeps the comments that end the entry in its last
+        // rendered field, so they follow whichever field renders last now.
+        if let (Some(from), Some(to)) = (last_before, self.last_rendered()) {
+            if from != to {
+                let comments = self.value_mut(from).map(|v| v.split_off(trailing_comments_start(v)));
+                self.keep_trailing_comments(&comments.unwrap_or_default());
+            }
+        }
+    }
+
+    /// Give `comments`, the tail of a removed field, to the last rendered
+    /// field. An entry with no rendered field left drops them.
+    pub fn keep_trailing_comments(&mut self, comments: &str) {
+        if comments.is_empty() {
             return;
         }
-        self.extra.push((key.to_string(), value));
-        self.field_order.push(FieldRef::Extra(self.extra.len() - 1));
+        if let Some(value) = self.last_rendered().and_then(|pos| self.value_mut(pos)) {
+            value.push_str(comments);
+        }
+    }
+
+    /// The `field_order` position of the last field that renders. A core
+    /// field left `None` stays in `field_order` but renders nothing.
+    fn last_rendered(&self) -> Option<usize> {
+        self.field_order.iter().rposition(|f| match f {
+            FieldRef::Core(slot) | FieldRef::CoreAlias { slot, .. } => {
+                self.core.slot(slot).is_some_and(Option::is_some)
+            }
+            FieldRef::Extra(i) => *i < self.extra.len(),
+        })
+    }
+
+    fn value_mut(&mut self, pos: usize) -> Option<&mut String> {
+        match self.field_order.get(pos)? {
+            FieldRef::Core(slot) | FieldRef::CoreAlias { slot, .. } => {
+                self.core.slot_mut(slot).and_then(Option::as_mut)
+            }
+            FieldRef::Extra(i) => self.extra.get_mut(*i).map(|(_, v)| v),
+        }
     }
 
     /// The canonical resolution stub line, e.g.
@@ -411,5 +456,39 @@ impl Entry {
         let marker = r.marker();
         let sep = if marker.is_empty() { "" } else { " " };
         Some(format!("<!-- {} → {marker}{sep}{} -->", self.id, r.raw))
+    }
+}
+
+/// A field value without the whole-line comments that end it: the text a
+/// reader of the field parses.
+pub fn own_text(value: &str) -> &str {
+    split_comments(value).0
+}
+
+/// A field value split into its own text and the whole-line `<!-- … -->`
+/// comments that end it, with the blank lines before and among them. The
+/// second half is empty when no comment ends the value.
+pub fn split_comments(value: &str) -> (&str, &str) {
+    value.split_at(trailing_comments_start(value))
+}
+
+/// Where [`split_comments`] cuts `value`. The first line is never a
+/// trailing comment: it is the field's own text.
+fn trailing_comments_start(value: &str) -> usize {
+    let mut end = value.len();
+    let mut commented = false;
+    for line in value.rsplit('\n') {
+        let start = end - line.len();
+        let t = line.trim();
+        if start == 0 || !(t.is_empty() || t.starts_with("<!--") && t.ends_with("-->")) {
+            break;
+        }
+        commented |= !t.is_empty();
+        end = start - 1;
+    }
+    if commented {
+        end
+    } else {
+        value.len()
     }
 }

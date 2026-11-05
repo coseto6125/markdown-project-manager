@@ -110,7 +110,6 @@ fn parse_entry(lines: &[&str], start: usize, heading: &str, location: Location, 
         extra: Vec::new(),
         field_order: Vec::new(),
         edges: Vec::new(),
-        trailing_comments: String::new(),
         resolution: resolution_from_heading,
     };
 
@@ -137,17 +136,8 @@ fn parse_entry(lines: &[&str], start: usize, heading: &str, location: Location, 
             }
             // Trim trailing blank continuation lines that actually belong to the
             // inter-block spacing, keeping internal structure intact.
-            let value = value.trim_end_matches('\n');
-            let ends_entry = j >= lines.len() || lines[j].starts_with("### ") || lines[j].starts_with("## ");
-            let value = match ends_entry {
-                true => {
-                    let (field, comments) = split_trailing_comments(value);
-                    entry.trailing_comments = comments.to_string();
-                    field
-                }
-                false => value,
-            };
-            store_field(&mut entry, &key, value.to_string());
+            let value = value.trim_end_matches('\n').to_string();
+            store_field(&mut entry, &key, value);
             i = j;
         } else {
             i += 1;
@@ -157,52 +147,6 @@ fn parse_entry(lines: &[&str], start: usize, heading: &str, location: Location, 
     derive_edges(&mut entry);
     derive_status(&mut entry);
     (entry, i)
-}
-
-/// Split whole-line `<!-- … -->` comments (and the blank lines around them)
-/// off the end of a field value, so they are not part of the field. Returns
-/// `(field, comments)`; the two halves concatenate back to `value`. The first
-/// line is never split off, because it is the field's own text.
-fn split_trailing_comments(value: &str) -> (&str, &str) {
-    let mut end = value.len();
-    let mut cut = None;
-    for line in value.rsplit('\n') {
-        let start = end - line.len();
-        if start == 0 {
-            break;
-        }
-        let t = line.trim();
-        if t.starts_with("<!--") && t.ends_with("-->") {
-            cut = Some(start - 1);
-        } else if !t.is_empty() {
-            break;
-        }
-        end = start - 1;
-    }
-    match cut {
-        Some(c) => value.split_at(value[..c].trim_end().len()),
-        None => (value, ""),
-    }
-}
-
-/// Upgrade an entry from a cache older than `Entry::trailing_comments`: such a
-/// cache keeps the comments after the last field inside that field's value.
-pub fn split_cached_trailing_comments(entry: &mut Entry) {
-    let value = match entry.field_order.last() {
-        Some(FieldRef::Core(slot) | FieldRef::CoreAlias { slot, .. }) => {
-            entry.core.slot_mut(slot).and_then(Option::as_mut)
-        }
-        Some(FieldRef::Extra(i)) => entry.extra.get_mut(*i).map(|(_, v)| v),
-        None => None,
-    };
-    let Some(value) = value else { return };
-    let (field, comments) = split_trailing_comments(value);
-    if comments.is_empty() {
-        return;
-    }
-    let (field, comments) = (field.to_string(), comments.to_string());
-    *value = field;
-    entry.trailing_comments = comments;
 }
 
 /// Split a `### ` heading into (id, provenance, optional resolution).
@@ -437,7 +381,7 @@ pub fn list_field_ids<'e>(entry: &'e Entry, key: &str) -> Vec<&'e str> {
         .extra
         .iter()
         .filter(|(k, _)| k == key)
-        .flat_map(|(_, v)| v.split(LIST_SEPARATORS))
+        .flat_map(|(_, v)| own_text(v).split(LIST_SEPARATORS))
         .filter_map(list_item_id)
         .collect()
 }
@@ -461,99 +405,74 @@ pub fn remove_list_item(value: &str, id: &str) -> Option<String> {
     Some(kept.to_string())
 }
 
-/// The phrases that make a following `FU-…` id a block, in `derive_edges`.
-const BLOCKED_NEEDLES: [&str; 2] = ["blocked: ", "blocked-on "];
-
-/// The `FU-…` ids of one mention, as byte spans into `s`: the id right at the
-/// start of `s`, then each id after a `,` or `;` separator.
-fn mention_id_spans(s: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    let mut pos = 0;
-    loop {
-        let len = s[pos..]
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .unwrap_or(s.len() - pos);
-        if !s[pos..pos + len].starts_with("FU-") {
-            return spans;
-        }
-        spans.push((pos, pos + len));
-        let after = &s[pos + len..];
-        let sep = after.len() - after.trim_start_matches([',', ';', ' ']).len();
-        if !after[..sep].contains(LIST_SEPARATORS) {
-            return spans;
-        }
-        pos += len + sep;
-    }
+/// The `next-action` mention `derive_edges` reads as a block: the first
+/// `blocked: ` (else `blocked-on `) that starts a word, when an `FU-` id
+/// follows it. Returns the id and the byte range from the phrase through the
+/// id and the `]` brackets that close it.
+fn blocked_mention(text: &str) -> Option<(&str, std::ops::Range<usize>)> {
+    ["blocked: ", "blocked-on "].into_iter().find_map(|needle| {
+        let at = text
+            .match_indices(needle)
+            .map(|(i, _)| i)
+            .find(|&i| !text[..i].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '-'))?;
+        let after = at + needle.len();
+        let id = fu_id_at(text, after)?;
+        let opened = text[after..id.start].matches('[').count();
+        let closed = text[id.end..].chars().take_while(|&c| c == ']').count().min(opened);
+        Some((&text[id.clone()], at..id.end + closed))
+    })
 }
 
-/// `text` without the `blocked: FU-x` / `blocked-on FU-x` mentions of `on`
-/// (every id when `None`), or `None` when no mention names it, so a caller
-/// leaves the text as it was. `blocked: FU-a, FU-b` is one mention with two
-/// ids: removing one id keeps the phrase for the other. A removed mention
-/// takes the separator after it, or the one before it at the end of a line, and
-/// nothing else changes.
+/// The byte range of the `FU-` id at `from`, after any `[` and spaces.
+fn fu_id_at(text: &str, from: usize) -> Option<std::ops::Range<usize>> {
+    let at = text.len() - text[from..].trim_start_matches(['[', ' ']).len();
+    let len = text[at..]
+        .find(|c: char| !crate::id::is_id_char(c))
+        .unwrap_or(text.len() - at);
+    crate::id::is_valid(&text[at..at + len]).then_some(at..at + len)
+}
+
+/// `text` without the mentions `derive_edges` reads as a block on `on` (on
+/// any id when `None`), or `None` when it reads none. A removal also takes
+/// the separator and spaces after the mention (else the separator and
+/// spaces before it), and its line when the mention is the whole line: `see
+/// blocked: FU-x, first` becomes `see first`. An id that a comma and another
+/// id follow leaves the phrase to that id: `blocked: FU-x, FU-y` becomes
+/// `blocked: FU-y`. The next mention then becomes the block, as a re-import reads it.
 pub fn remove_blocked_mentions(text: &str, on: Option<&str>) -> Option<String> {
-    const SEPARATORS: [char; 4] = [',', ';', ' ', '\t'];
-    let mut out = String::new();
-    let mut rest = text;
-    let mut changed = false;
-    while let Some((at, needle)) = BLOCKED_NEEDLES
-        .iter()
-        .filter_map(|n| rest.find(n).map(|i| (i, *n)))
-        .min_by_key(|(i, _)| *i)
-    {
-        let list_start = at + needle.len();
-        let skipped_len = rest[list_start..].len() - rest[list_start..].trim_start_matches(['[', ' ']).len();
-        let ids_from = list_start + skipped_len;
-        let spans = mention_id_spans(&rest[ids_from..]);
-        let Some(&(_, last_end)) = spans.last() else {
-            out.push_str(&rest[..list_start]);
-            rest = &rest[list_start..];
-            continue;
+    let mut out = text.to_string();
+    let mut removed = false;
+    while let Some((id, range)) = blocked_mention(&out) {
+        if on.is_some_and(|t| t != id) {
+            break;
+        }
+        removed = true;
+        let rest = &out[range.end..];
+        let next = rest
+            .trim_start_matches(' ')
+            .trim_start_matches(LIST_SEPARATORS)
+            .trim_start_matches(' ');
+        let mut tail = rest.len() - next.len();
+        let start = if tail == 0 {
+            let before = out[..range.start].trim_end_matches(' ');
+            before
+                .strip_suffix(LIST_SEPARATORS)
+                .unwrap_or(before)
+                .trim_end_matches(' ')
+                .len()
+        } else if rest.trim_start_matches(' ').starts_with(',') && fu_id_at(next, 0).is_some() {
+            range.start + out[range.start..].find(' ').map_or(0, |i| i + 1)
+        } else {
+            range.start
         };
-        let ids = &rest[ids_from..];
-        let keep: Vec<bool> = spans.iter().map(|&(a, b)| on.is_some_and(|t| &ids[a..b] != t)).collect();
-        let list_end = ids_from + last_end;
-        if keep.iter().all(|k| *k) {
-            out.push_str(&rest[..list_end]);
-            rest = &rest[list_end..];
-            continue;
+        let whole_line = start == 0 || out[..start].ends_with('\n');
+        if whole_line && out[range.end + tail..].starts_with('\n') {
+            tail += 1;
         }
-        changed = true;
-        if keep.iter().any(|k| *k) {
-            out.push_str(&rest[..ids_from]);
-            let mut first = true;
-            for (k, &(a, b)) in spans.iter().enumerate().filter(|(k, _)| keep[*k]) {
-                if !first {
-                    out.push_str(&ids[spans[k - 1].1..a]);
-                }
-                out.push_str(&ids[a..b]);
-                first = false;
-            }
-            rest = &rest[list_end..];
-            continue;
-        }
-        let opened = rest[list_start..ids_from].matches('[').count();
-        let closed = rest[list_end..].chars().take_while(|c| *c == ']').count().min(opened);
-        let mut after = &rest[list_end + closed..];
-        out.push_str(&rest[..at]);
-        if out.ends_with('(') && after.starts_with(')') {
-            out.pop();
-            after = &after[1..];
-        }
-        let mut stripped = after.trim_start_matches(SEPARATORS);
-        let line_end = stripped.is_empty() || stripped.starts_with(['\n', ')', ']']);
-        if line_end {
-            out.truncate(out.trim_end_matches([' ', '\t', ',', ';', ':', '—', '–']).len());
-            // A mention alone on its line takes the whole line.
-            if (out.is_empty() || out.ends_with('\n')) && stripped.starts_with('\n') {
-                stripped = &stripped[1..];
-            }
-        }
-        rest = stripped;
+        out.replace_range(start..range.end + tail, "");
     }
-    out.push_str(rest);
-    changed.then_some(out)
+    out.truncate(out.trim_end().len());
+    removed.then_some(out)
 }
 
 fn owned_ids(entry: &Entry, key: &str) -> Vec<String> {
@@ -588,8 +507,8 @@ fn derive_edges(entry: &mut Entry) {
     }
     // `blocked: FU-…` mentions in next-action keep the entry in Open.
     if let Some(na) = &entry.core.next_action {
-        if let Some(target) = find_fu_after(na, "blocked: ").or_else(|| find_fu_after(na, "blocked-on ")) {
-            entry.edges.push(Edge::BlockedOn(target));
+        if let Some((target, _)) = blocked_mention(own_text(na)) {
+            entry.edges.push(Edge::BlockedOn(target.to_string()));
         }
     }
     for target in owned_ids(entry, BLOCKED_ON_KEY) {
@@ -652,13 +571,14 @@ fn derive_status(entry: &mut Entry) {
     }
 }
 
-/// The raw `in-progress` field value, if the entry carries one.
+/// The `in-progress` field value without its trailing comments, if the entry
+/// carries one.
 pub fn in_progress_value(entry: &Entry) -> Option<&str> {
     entry
         .extra
         .iter()
         .find(|(k, _)| k == IN_PROGRESS_KEY)
-        .map(|(_, v)| v.as_str())
+        .map(|(_, v)| own_text(v))
 }
 
 /// The PR or branch the `in-progress` field names. `None` when the field is
@@ -689,12 +609,7 @@ fn first_pr(haystack: &str) -> Option<u32> {
 
 fn find_fu_after(haystack: &str, needle: &str) -> Option<String> {
     let idx = haystack.find(needle)? + needle.len();
-    let rest = haystack[idx..].trim_start_matches(['[', ' ']);
-    let id: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    (id.starts_with("FU-")).then_some(id)
+    fu_id_at(haystack, idx).map(|id| haystack[id].to_string())
 }
 
 /// Collect `[[FU-id]]` targets from text. Each `]]` pairs with the nearest

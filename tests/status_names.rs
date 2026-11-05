@@ -1,7 +1,7 @@
 use markdown_project_manager::model::Status;
 
 #[test]
-fn test_status_name_round_trips_for_every_variant() {
+fn test_status_name_round_trips_for_every_listed_status() {
     for status in Status::ALL {
         assert_eq!(status.as_str().parse::<Status>(), Ok(status));
     }

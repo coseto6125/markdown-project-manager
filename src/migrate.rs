@@ -288,7 +288,6 @@ mod tests {
             extra: Vec::new(),
             field_order: Vec::new(),
             edges: Vec::new(),
-            trailing_comments: String::new(),
             resolution: None,
         }
     }

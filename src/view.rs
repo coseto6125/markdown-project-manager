@@ -20,7 +20,7 @@ pub fn entry_json(entry: &Entry, full: bool) -> Value {
         }),
     );
     if let Some(sz) = &entry.core.size {
-        m.insert("size".into(), json!(sz));
+        m.insert("size".into(), json!(own_text(sz)));
     }
     if !entry.provenance.is_empty() {
         m.insert("provenance".into(), json!(entry.provenance));
