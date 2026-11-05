@@ -133,7 +133,7 @@ mpm validate                           # dangling 連結、重複 id
 | Entry | `id` + `category` + `status` + 6 個核心欄位（owner/scope/why-deferred/next-action/size/links）+ 有序的額外欄位 |
 | 欄位順序 | 逐筆 verbatim 保留（`original-scope` 原樣 round-trip 成 `original-scope`，一次性的鍵保留原位） |
 | Status | `open` · `in-progress`（留在 open，由 `in-progress: PR #N` / `branch X` 欄位推出，優先於 blocked）· `done` · `wontfix` · `blocked`（留在 open）· `superseded` |
-| Edges | `blocked-on`、`links-to`（來自 `[[FU-id]]`）、`superseded-by`、`carried-over-from`、`done-in-PR`、`surfaced-in-PR`、`in-progress-in`（PR 或分支；`query pr:N` 也會比對到）|
+| Edges | `blocked-on`（`mpm block` 寫成 `blocked-on: FU-a; FU-b` 欄位，手寫時 `,` 也可分隔）、`links-to`（來自任何欄位裡的 `[[FU-id]]`；`mpm link` 寫進 `links-to` 欄位）、`superseded-by`、`carried-over-from`、`done-in-PR`、`surfaced-in-PR`、`in-progress-in`（PR 或分支；`query pr:N` 也會比對到）|
 | 渲染 | canonical 形式；第一次 `import` + render 是一次性正規化，之後 byte-stable |
 
 ## 授權

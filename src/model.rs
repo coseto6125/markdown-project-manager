@@ -10,9 +10,12 @@ use serde::{Deserialize, Serialize};
 /// Bump on any breaking change to the cached structs; a mismatch forces a
 /// transparent re-import from the markdown. A new enum variant appended at the
 /// end is not breaking: the cache encodes variants by name (`to_vec_named`).
-/// A bump re-imports, and a re-import drops the `block` / `link` edges that live
-/// only in the cache.
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
+
+/// The schema before `block` / `link` wrote the `blocked-on` / `links-to`
+/// fields. Its caches hold edges that no field records, so `store::load`
+/// upgrades such a cache instead of re-importing and losing them.
+pub const FIELDLESS_EDGES_VERSION: u16 = 1;
 
 /// The six known core fields. Everything else lands in [`Entry::extra`].
 /// Spelling here is the canonical render spelling; aliases (e.g. `original-scope`
@@ -140,6 +143,18 @@ impl Status {
 
 /// The field key that marks an entry in progress.
 pub const IN_PROGRESS_KEY: &str = "in-progress";
+
+/// The field `mpm block` writes: plain ids, `FU-a; FU-b`.
+pub const BLOCKED_ON_KEY: &str = "blocked-on";
+
+/// The field `mpm link` writes: wikilinks, `[[FU-a]]; [[FU-b]]`.
+pub const LINKS_TO_KEY: &str = "links-to";
+
+/// What separates the items of a `blocked-on` / `links-to` field when read.
+pub const LIST_SEPARATORS: [char; 2] = [';', ','];
+
+/// What mpm writes between list items, and between appended field values.
+pub const LIST_JOIN: &str = "; ";
 
 /// The PR or branch an entry is being fixed in, as written in its
 /// `in-progress` field: `PR #912` or `branch fix/x`.
@@ -333,6 +348,34 @@ pub fn size_bucket(size: Option<&str>) -> &'static str {
 }
 
 impl Entry {
+    /// Set a field: a core slot, an existing extra key, or a new extra key at the
+    /// end. `append` joins onto a non-empty value with `"; "`.
+    pub fn set_field(&mut self, key: &str, value: String, append: bool) {
+        let merge = |existing: Option<String>, value: String| match existing {
+            Some(cur) if append && !cur.is_empty() => format!("{cur}{LIST_JOIN}{value}"),
+            _ => value,
+        };
+        if CORE_KEYS.contains(&key) {
+            let slot = self.core.slot_mut(key).expect("CORE_KEYS has a slot");
+            *slot = Some(merge(slot.take(), value));
+            if !self
+                .field_order
+                .iter()
+                .any(|f| matches!(f, FieldRef::Core(k) | FieldRef::CoreAlias { slot: k, .. } if k == key))
+            {
+                self.field_order.push(FieldRef::Core(key.to_string()));
+            }
+            return;
+        }
+        if let Some(pos) = self.extra.iter().position(|(k, _)| k == key) {
+            let cur = std::mem::take(&mut self.extra[pos].1);
+            self.extra[pos].1 = merge(Some(cur), value);
+            return;
+        }
+        self.extra.push((key.to_string(), value));
+        self.field_order.push(FieldRef::Extra(self.extra.len() - 1));
+    }
+
     /// The canonical resolution stub line, e.g.
     /// `<!-- FU-… → ✅ done in PR #370 (merged as abc1234) — note -->`. Rendered
     /// from the verbatim `raw` resolution text so every phrasing round-trips.

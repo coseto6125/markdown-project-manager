@@ -336,24 +336,76 @@ fn store_field(entry: &mut Entry, key: &str, value: String) {
     entry.field_order.push(FieldRef::Extra(idx));
 }
 
-/// Recompute derived edges after a mutation, preserving manually-authored
-/// `BlockedOn`/`LinksTo` edges (added by the `block`/`link` commands, which may
-/// not appear in body text). Resolution/provenance edges are fully recomputed.
+/// Recompute every edge and the status from the entry's fields after a
+/// mutation. `block` and `link` write their fields, so the markdown carries
+/// every edge.
 pub fn rebuild_entry_edges(entry: &mut Entry) {
-    let manual: Vec<Edge> = entry
-        .edges
-        .iter()
-        .filter(|e| matches!(e, Edge::BlockedOn(_) | Edge::LinksTo(_)))
-        .cloned()
-        .collect();
     entry.edges.clear();
     derive_edges(entry);
-    for m in manual {
-        if !entry.edges.contains(&m) {
-            entry.edges.push(m);
-        }
-    }
     set_status_from_resolution(entry);
+}
+
+/// Upgrade an entry from a [`FIELDLESS_EDGES_VERSION`] cache. Such a cache
+/// holds `block` / `link` edges that no field records. Write each one that a
+/// field can carry into its field, then re-derive every edge and the status,
+/// so the entry matches what its markdown will derive.
+pub fn migrate_cache_only_edges(entry: &mut Entry) {
+    let mut derived = entry.clone();
+    rebuild_entry_edges(&mut derived);
+    let missing: Vec<(&str, String)> = entry
+        .edges
+        .iter()
+        .filter(|e| !derived.edges.contains(e))
+        .filter_map(|e| match e {
+            Edge::BlockedOn(t) if crate::id::is_valid(t) => Some((BLOCKED_ON_KEY, t.clone())),
+            Edge::LinksTo(t) if crate::id::is_valid(t) => Some((LINKS_TO_KEY, format!("[[{t}]]"))),
+            _ => None,
+        })
+        .collect();
+    for (key, item) in missing {
+        entry.set_field(key, item, true);
+    }
+    rebuild_entry_edges(entry);
+}
+
+/// The id in one item of a `blocked-on` / `links-to` field, `[[…]]` stripped.
+/// `None` for an item that is not exactly one id, such as prose or `none`.
+pub fn list_item_id(item: &str) -> Option<&str> {
+    let id = item.trim().trim_start_matches("[[").trim_end_matches("]]").trim();
+    crate::id::is_valid(id).then_some(id)
+}
+
+/// The ids in every `key` field, in field order.
+pub fn list_field_ids<'e>(entry: &'e Entry, key: &str) -> Vec<&'e str> {
+    entry
+        .extra
+        .iter()
+        .filter(|(k, _)| k == key)
+        .flat_map(|(_, v)| v.split(LIST_SEPARATORS))
+        .filter_map(list_item_id)
+        .collect()
+}
+
+/// `value` without each item that names `id` and the separator after it.
+/// `None` when no item names `id`, so a caller leaves the text as it was.
+pub fn remove_list_item(value: &str, id: &str) -> Option<String> {
+    let items: Vec<&str> = value.split_inclusive(LIST_SEPARATORS).collect();
+    let is_target = |item: &&str| list_item_id(item.trim_end_matches(LIST_SEPARATORS)) == Some(id);
+    if !items.iter().any(is_target) {
+        return None;
+    }
+    let kept: String = items.into_iter().filter(|item| !is_target(item)).collect();
+    Some(kept.trim().trim_end_matches(LIST_SEPARATORS).trim_end().to_string())
+}
+
+fn owned_ids(entry: &Entry, key: &str) -> Vec<String> {
+    list_field_ids(entry, key).into_iter().map(str::to_string).collect()
+}
+
+fn push_edge(entry: &mut Entry, edge: Edge) {
+    if !entry.edges.contains(&edge) {
+        entry.edges.push(edge);
+    }
 }
 
 /// Build outbound edges from heading provenance, body links, and resolution.
@@ -370,20 +422,20 @@ fn derive_edges(entry: &mut Entry) {
     // `[[FU-id]]` wikilinks anywhere in the body.
     for (_, val) in field_values(entry) {
         for target in wikilinks(&val) {
-            if !entry
-                .edges
-                .iter()
-                .any(|e| matches!(e, Edge::LinksTo(t) if *t == target))
-            {
-                entry.edges.push(Edge::LinksTo(target));
-            }
+            push_edge(entry, Edge::LinksTo(target));
         }
+    }
+    for target in owned_ids(entry, LINKS_TO_KEY) {
+        push_edge(entry, Edge::LinksTo(target));
     }
     // `blocked: FU-…` mentions in next-action keep the entry in Open.
     if let Some(na) = &entry.core.next_action {
         if let Some(target) = find_fu_after(na, "blocked: ").or_else(|| find_fu_after(na, "blocked-on ")) {
             entry.edges.push(Edge::BlockedOn(target));
         }
+    }
+    for target in owned_ids(entry, BLOCKED_ON_KEY) {
+        push_edge(entry, Edge::BlockedOn(target));
     }
     // A resolved entry is never in progress, even when an old mpm left the marker.
     if entry.resolution.is_none() && entry.location == Location::Open {
@@ -482,21 +534,19 @@ fn find_fu_after(haystack: &str, needle: &str) -> Option<String> {
     (id.starts_with("FU-")).then_some(id)
 }
 
-/// Collect `[[FU-id]]` targets from text.
+/// Collect `[[FU-id]]` targets from text. Each `]]` pairs with the nearest
+/// `[[` before it, so an unclosed `[[` does not swallow a later link.
 fn wikilinks(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
-    while let Some(open) = rest.find("[[") {
-        rest = &rest[open + 2..];
-        if let Some(close) = rest.find("]]") {
-            let inner = &rest[..close];
-            if inner.starts_with("FU-") {
+    while let Some(close) = rest.find("]]") {
+        if let Some(open) = rest[..close].rfind("[[") {
+            let inner = &rest[open + 2..close];
+            if crate::id::is_valid(inner) {
                 out.push(inner.to_string());
             }
-            rest = &rest[close + 2..];
-        } else {
-            break;
         }
+        rest = &rest[close + 2..];
     }
     out
 }
