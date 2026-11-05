@@ -3,7 +3,7 @@
 //! cache is missing, version-mismatched, or older than either markdown file, the
 //! store is transparently re-imported from markdown.
 
-use crate::model::{Store, SCHEMA_VERSION};
+use crate::model::{Store, FIELDLESS_EDGES_VERSION, SCHEMA_VERSION};
 use crate::{parse, render};
 use anyhow::{Context, Result};
 use std::fs;
@@ -86,9 +86,17 @@ fn mtime(p: &Path) -> i64 {
 pub fn load(paths: &Paths) -> Result<Store> {
     let cur = (mtime(&paths.open_md), mtime(&paths.done_md));
     if let Ok(bytes) = fs::read(&paths.cache) {
-        if let Ok(store) = rmp_serde::from_slice::<Store>(&bytes) {
-            if store.schema_version == SCHEMA_VERSION && store.source_mtimes == cur {
-                return Ok(store);
+        if let Ok(mut store) = rmp_serde::from_slice::<Store>(&bytes) {
+            if store.source_mtimes == cur {
+                match store.schema_version {
+                    SCHEMA_VERSION => return Ok(store),
+                    FIELDLESS_EDGES_VERSION => {
+                        store.entries.iter_mut().for_each(parse::migrate_cache_only_edges);
+                        store.schema_version = SCHEMA_VERSION;
+                        return Ok(store);
+                    }
+                    _ => {}
+                }
             }
         }
     }

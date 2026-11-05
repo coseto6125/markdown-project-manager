@@ -88,6 +88,7 @@ fn edges_json(entry: &Entry) -> Map<String, Value> {
     let mut carried_from = None;
     let mut done_pr = None;
     let mut surfaced_pr = None;
+    let mut in_progress = None;
 
     for e in &entry.edges {
         match e {
@@ -97,6 +98,7 @@ fn edges_json(entry: &Entry) -> Map<String, Value> {
             Edge::CarriedOverFrom(t) => carried_from = Some(t.clone()),
             Edge::DoneInPr { pr, .. } => done_pr = Some(*pr),
             Edge::SurfacedInPr(pr) => surfaced_pr = Some(*pr),
+            Edge::InProgressIn(w) => in_progress = Some(w),
             Edge::DoneInBranch { .. } | Edge::Wontfix { .. } | Edge::Supersedes(_) => {}
         }
     }
@@ -117,6 +119,15 @@ fn edges_json(entry: &Entry) -> Map<String, Value> {
     }
     if let Some(pr) = surfaced_pr {
         m.insert("surfaced_pr".into(), json!(pr));
+    }
+    match in_progress {
+        Some(WorkRef::Pr(pr)) => {
+            m.insert("in_progress_pr".into(), json!(pr));
+        }
+        Some(WorkRef::Branch(b)) => {
+            m.insert("in_progress_branch".into(), json!(b));
+        }
+        None => {}
     }
     m
 }

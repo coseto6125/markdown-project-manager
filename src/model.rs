@@ -8,8 +8,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Bump on any breaking change to the cached structs; a mismatch forces a
-/// transparent re-import from the markdown.
-pub const SCHEMA_VERSION: u16 = 1;
+/// transparent re-import from the markdown. A new enum variant appended at the
+/// end is not breaking: the cache encodes variants by name (`to_vec_named`).
+pub const SCHEMA_VERSION: u16 = 2;
+
+/// The schema before `block` / `link` wrote the `blocked-on` / `links-to`
+/// fields. Its caches hold edges that no field records, so `store::load`
+/// upgrades such a cache instead of re-importing and losing them.
+pub const FIELDLESS_EDGES_VERSION: u16 = 1;
 
 /// The six known core fields. Everything else lands in [`Entry::extra`].
 /// Spelling here is the canonical render spelling; aliases (e.g. `original-scope`
@@ -117,6 +123,9 @@ pub enum Status {
     /// Stays in the Open file; `next-action` notes the dependency.
     Blocked,
     Superseded,
+    /// Stays in the Open file; an `in-progress` field names the PR or branch
+    /// fixing it. Outranks `Blocked`.
+    InProgress,
 }
 
 impl Status {
@@ -127,21 +136,84 @@ impl Status {
             Status::Wontfix => "wontfix",
             Status::Blocked => "blocked",
             Status::Superseded => "superseded",
+            Status::InProgress => "in-progress",
+        }
+    }
+}
+
+/// The field key that marks an entry in progress.
+pub const IN_PROGRESS_KEY: &str = "in-progress";
+
+/// The field `mpm block` writes: plain ids, `FU-a; FU-b`.
+pub const BLOCKED_ON_KEY: &str = "blocked-on";
+
+/// The field `mpm link` writes: wikilinks, `[[FU-a]]; [[FU-b]]`.
+pub const LINKS_TO_KEY: &str = "links-to";
+
+/// What separates the items of a `blocked-on` / `links-to` field when read.
+pub const LIST_SEPARATORS: [char; 2] = [';', ','];
+
+/// What mpm writes between list items, and between appended field values.
+pub const LIST_JOIN: &str = "; ";
+
+/// The PR or branch an entry is being fixed in, as written in its
+/// `in-progress` field: `PR #912` or `branch fix/x`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkRef {
+    Pr(u32),
+    Branch(String),
+}
+
+impl WorkRef {
+    /// Parse an `in-progress` field value. `None` for a value in neither form.
+    /// Text after the PR number (`PR #912 (draft)`) is ignored.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if let Some(rest) = value.strip_prefix("PR #") {
+            let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            return rest[..digits].parse().ok().map(WorkRef::Pr);
+        }
+        value.strip_prefix("branch ").and_then(Self::branch)
+    }
+
+    /// A branch marker. `None` for an empty name or one with whitespace, which
+    /// no git branch has.
+    pub fn branch(name: &str) -> Option<Self> {
+        let name = name.trim();
+        (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| WorkRef::Branch(name.to_string()))
+    }
+}
+
+impl std::fmt::Display for WorkRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkRef::Pr(pr) => write!(f, "PR #{pr}"),
+            WorkRef::Branch(b) => write!(f, "branch {b}"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Edge {
-    DoneInPr { pr: u32, commit: Option<String> },
-    DoneInBranch { branch: String, commit: Option<String> },
-    Wontfix { reason: String },
+    DoneInPr {
+        pr: u32,
+        commit: Option<String>,
+    },
+    DoneInBranch {
+        branch: String,
+        commit: Option<String>,
+    },
+    Wontfix {
+        reason: String,
+    },
     BlockedOn(String),
     SupersededBy(String),
     Supersedes(String),
     LinksTo(String),
     CarriedOverFrom(String),
     SurfacedInPr(u32),
+    /// Derived from the `in-progress` field.
+    InProgressIn(WorkRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +348,34 @@ pub fn size_bucket(size: Option<&str>) -> &'static str {
 }
 
 impl Entry {
+    /// Set a field: a core slot, an existing extra key, or a new extra key at the
+    /// end. `append` joins onto a non-empty value with `"; "`.
+    pub fn set_field(&mut self, key: &str, value: String, append: bool) {
+        let merge = |existing: Option<String>, value: String| match existing {
+            Some(cur) if append && !cur.is_empty() => format!("{cur}{LIST_JOIN}{value}"),
+            _ => value,
+        };
+        if CORE_KEYS.contains(&key) {
+            let slot = self.core.slot_mut(key).expect("CORE_KEYS has a slot");
+            *slot = Some(merge(slot.take(), value));
+            if !self
+                .field_order
+                .iter()
+                .any(|f| matches!(f, FieldRef::Core(k) | FieldRef::CoreAlias { slot: k, .. } if k == key))
+            {
+                self.field_order.push(FieldRef::Core(key.to_string()));
+            }
+            return;
+        }
+        if let Some(pos) = self.extra.iter().position(|(k, _)| k == key) {
+            let cur = std::mem::take(&mut self.extra[pos].1);
+            self.extra[pos].1 = merge(Some(cur), value);
+            return;
+        }
+        self.extra.push((key.to_string(), value));
+        self.field_order.push(FieldRef::Extra(self.extra.len() - 1));
+    }
+
     /// The canonical resolution stub line, e.g.
     /// `<!-- FU-… → ✅ done in PR #370 (merged as abc1234) — note -->`. Rendered
     /// from the verbatim `raw` resolution text so every phrasing round-trips.

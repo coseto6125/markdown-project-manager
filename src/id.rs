@@ -37,6 +37,13 @@ pub fn mint_with(date: &str, nanos: u128, pid: u32) -> String {
     format!("FU-{date}-{:012x}", mix48(nanos, pid, counter))
 }
 
+/// Whether `id` has the shape the markdown parser reads back: `FU-` and then
+/// ASCII letters, digits and `-`.
+pub fn is_valid(id: &str) -> bool {
+    id.strip_prefix("FU-")
+        .is_some_and(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
 /// Live mint: today's date + the current creation nanos + this process's pid.
 pub fn mint(nanos: u128) -> String {
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();

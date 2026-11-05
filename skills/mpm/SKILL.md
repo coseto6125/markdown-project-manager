@@ -1,6 +1,6 @@
 ---
 name: mpm
-description: Read/update the cross-session follow-ups log (deferred work) via the mpm CLI instead of reading the whole FOLLOWUPS.md. Use at three moments — before starting a task (check for related/blocking work), during (file what you defer), and after (mark done). Reach for mpm whenever a task involves opening a PR, deferring work, or asking "did some PR already close a follow-up".
+description: Read/update the cross-session follow-ups log (deferred work) via the mpm CLI instead of reading the whole FOLLOWUPS.md. Use at four moments — before starting a task (check for related/blocking work), when you start fixing an entry (mark it in progress by its branch, then its PR), during (file what you defer), and after the PR merges (mark done). Reach for mpm whenever a task involves opening a PR, deferring work, or asking "did some PR already close a follow-up".
 ---
 
 # mpm — follow-ups, without reading the whole file
@@ -10,11 +10,12 @@ description: Read/update the cross-session follow-ups log (deferred work) via th
 the slice you need so you never read the 25 KB+ file. Markdown stays the source
 of truth — every change re-renders both files.
 
-## The one rule: query the log at three moments
+## The one rule: query the log at four moments
 
-- **Before** a task → `mpm list --status open` (and `mpm query pr:<N>` if a PR is involved). Is this already filed? Blocked? Already done?
-- **During** → file what you defer: `mpm add ...`. File a blocker: `mpm block <id> --on <other>`.
-- **After** → `mpm done <id> --pr <N>` (or `--branch`). Won't do it: `mpm wontfix <id> --reason ...`.
+- **Before** a task → `mpm list --status open`, then `mpm list --status in-progress` (and `mpm query pr:<N>` if a PR is involved). Is this already filed? Blocked? In progress? Already done?
+- **Start** → before your first edit on a fix for an entry, run `mpm start <id> --branch <branch>`. When its PR opens, run `mpm start <id> --pr <N>`. When the PR fixes only part of the entry, first `mpm add` the rest as a new entry and `mpm link` it to the original.
+- **During** → before you `mpm add` an issue you found in the task, fix it or ask the user. File it only after the user says to leave it, or when the user froze the scope. File a blocker: `mpm block <id> --on <other>`.
+- **After** the PR merges → `mpm done <id>`. It resolves with the PR or branch that `start` recorded. Work dropped: `mpm stop <id>`. Won't do it: `mpm wontfix <id> --reason ...`.
 
 If you open a PR without checking the log first, you have skipped the one rule.
 
@@ -23,7 +24,7 @@ If you open a PR without checking the log first, you have skipped the one rule.
 `mpm` finds the log automatically by walking up from the current directory to the
 nearest `.claude/FOLLOWUPS.md` — like git finding `.git`. So **inside any repo,
 just run `mpm <cmd>`** and it targets that repo's log. Pass `--dir <path-to-.claude>`
-only to point at a DIFFERENT repo's log than the one you're standing in:
+only to point at another repo's log:
 
 ```
 mpm list --status open                          # this repo's log (auto-found)
@@ -33,42 +34,27 @@ mpm --dir /other/repo/.claude list --status open  # explicitly another repo's lo
 ## Read (never mutates)
 
 ```
-mpm list --status open                 # triage open work (default if no filter)
-mpm list --status open --json          # machine-readable (compact JSON)
-mpm show <id>                          # one full entry
-mpm stub <id>                          # just the one-line resolution stub
-mpm query pr:498                       # did PR #498 surface or close a follow-up?
-mpm query status:open size:L           # flat key:value AND filter (space-separated)
-mpm graph <id> --direction up          # what DEPENDS ON <id> (who is blocked-on / links-to it)
-mpm graph <id> --direction down        # what <id> ITSELF depends on (its own blocked-on / links-to / supersedes)
-mpm validate                           # dangling links, duplicate ids
-mpm next-id                            # the next free id for today (no entry created)
+mpm --help            # every subcommand, always current
+mpm <sub> --help      # that subcommand's flags
+
+Reach for these first, and let `--help` supply the flags:
+  read      list · show · stub · query · graph
+  write     add · start · stop · done · wontfix · supersede · block · unblock · reopen · set · move · link
+  check     validate
 ```
 
 `query` filter keys (combine with spaces, all must match): `status`, `category`,
 `size`, `pr`, `blocked-on:<id>`, `links-to:<id>`, `owner`. `status` values:
-`open`, `done`, `wontfix`, `blocked`, `superseded`. `size` values: `S`, `M`, `L`.
+`open`, `in-progress`, `done`, `wontfix`, `blocked`, `superseded`. `size` values: `S`, `M`, `L`.
+`pr:<N>` also matches an entry that `start --pr <N>` marked in progress.
 
 **graph direction — ignore the words "upstream/downstream" in the request, decide by meaning:** "what depends on / is blocked on / waits for X" → `--direction up`. "what X itself needs / depends on" → `--direction down`.
 
-## Write (re-renders both markdown files; prints the affected id)
+## Write: four constraints `--help` does not tell you
 
-```
-mpm add --category "<C>" --scope "<what & why it matters>" [--why <out-of-scope|blocked-by|size-too-large|other>] [--size S|M|L] [--surfaced "PR #<N>"]
-mpm done <id> --pr <N> [--commit <sha>] [--note "..."]    # resolved by a PR
-mpm done <id> --branch <branch> --commit <sha>            # resolved on a branch, not a PR
-mpm wontfix <id> --reason "..."
-mpm supersede <id> --by <other-id>                        # <other-id> must exist
-mpm block <id> --on <other-id>      ·     mpm unblock <id> [--on <other-id>]
-mpm reopen <id>                                           # pull a resolved entry back to open
-mpm set <id> --field <name> --value "..." [--append]      # edit one field; --append for links/lists
-mpm move <id> --category "<C>"
-mpm link <from-id> <to-id>                                # records a links-to edge
-```
+Every write re-renders both markdown files and prints the affected id.
 
-## Three hard constraints (these are where calls go wrong)
-
-1. **`done` needs exactly one of `--pr` or `--branch`** — never zero, never both. PR resolution → `--pr <N>`. Branch-only → `--branch <name> --commit <sha>`.
+1. **`done` needs one PR or branch, never both.** With no flag it takes the one `start` recorded. Without a `start`, pass `--pr <N>` (the normal close) or `--branch <name> --commit <sha>` (work that never became a PR). `start` takes exactly one of `--pr` or `--branch`, and refuses a resolved entry.
 2. **`add` requires `--category` and `--scope`.** Everything else is optional. `--scope` is one sentence: what's deferred *and why it matters*.
 3. **Targets of `supersede --by`, `block --on`, `link` must be existing ids.** Run `mpm list`/`mpm show` first if unsure the id exists.
 4. **`ambiguous id <id>: N entries share it`** means the log has a duplicate id (a real data bug). Run `mpm validate` to see all duplicates, then resolve by editing the markdown — mpm can't disambiguate for you.

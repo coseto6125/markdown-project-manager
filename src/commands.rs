@@ -8,7 +8,7 @@ use crate::model::*;
 use crate::output::{emit, Format};
 use crate::store::{self, Paths};
 use crate::{render, view};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
@@ -47,6 +47,8 @@ pub fn run(cmd: Command, paths: &Paths) -> Result<()> {
             commit,
             note,
         } => done(paths, &id, pr, branch, commit, note),
+        Command::Start { id, pr, branch } => start(paths, &id, pr, branch),
+        Command::Stop { id } => stop(paths, &id),
         Command::Wontfix { id, reason } => wontfix(paths, &id, reason),
         Command::Supersede { id, by } => supersede(paths, &id, &by),
         Command::Block { id, on } => block(paths, &id, &on),
@@ -111,16 +113,16 @@ fn now_nanos() -> u128 {
 /// is a genuine typo and is reported. Returns the (post-replay) store so callers
 /// avoid a second load.
 fn ensure_resolvable(paths: &Paths, ids: &[&str]) -> Result<Store> {
-    let store = crate::wal::read(paths)?;
-    if let Some(missing) = first_missing(&store, ids) {
+    let mut store = crate::wal::read(paths)?;
+    if first_missing(&store, ids).is_some() {
         // Drain pending commits and re-read once before declaring it absent.
         let _ = crate::wal::try_group_commit(paths);
-        let store = crate::wal::read(paths)?;
-        if let Some(missing) = first_missing(&store, ids) {
-            bail!("no entry with id {missing}");
-        }
-        let _ = missing;
-        return Ok(store);
+        store = crate::wal::read(paths)?;
+    }
+    // `find` also refuses a duplicated id. The WAL replay drops a failed op
+    // silently, so the command must fail here or it reports a no-op as success.
+    for id in ids {
+        find(&store, id)?;
     }
     Ok(store)
 }
@@ -232,6 +234,9 @@ fn add(
     surfaced: Option<String>,
 ) -> Result<()> {
     let id = id.unwrap_or_else(|| crate::id::mint(now_nanos()));
+    if !crate::id::is_valid(&id) {
+        bail!("invalid id {id}: an id is FU- followed by letters, digits and -");
+    }
     crate::wal::submit(
         paths,
         crate::wal::Op::Add {
@@ -292,7 +297,13 @@ fn list(
         candidates.retain(|&i| size_bucket(store.entries[i].core.size.as_deref()) == want);
     }
     if blocked {
-        candidates.retain(|&i| store.entries[i].status == Status::Blocked);
+        // An in-progress entry outranks blocked in `status` but can still be blocked.
+        candidates.retain(|&i| {
+            let e = &store.entries[i];
+            e.status == Status::Blocked
+                || (e.status == Status::InProgress
+                    && e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(_))))
+        });
     }
     if let Some(p) = pr {
         let hits = idx.by_pr.get(&p).cloned().unwrap_or_default();
@@ -313,7 +324,7 @@ fn list(
 
 pub fn apply_set(store: &mut Store, id: &str, field: &str, value: String, append: bool) -> Result<String> {
     let i = find(store, id)?;
-    apply_field(&mut store.entries[i], field, value, append);
+    store.entries[i].set_field(field, value, append);
     rebuild_edges(&mut store.entries[i]);
     Ok(id.to_string())
 }
@@ -331,40 +342,6 @@ fn set(paths: &Paths, id: &str, field: &str, value: String, append: bool) -> Res
     )?;
     println!("{id}");
     Ok(())
-}
-
-/// Set or append a field, preserving canonical-vs-alias spelling + order.
-fn apply_field(entry: &mut Entry, key: &str, value: String, append: bool) {
-    // Existing core slot?
-    if CORE_KEYS.contains(&key) {
-        let slot = entry.core.slot_mut(key).unwrap();
-        *slot = Some(merge(slot.take(), value, append));
-        if !entry
-            .field_order
-            .iter()
-            .any(|f| matches!(f, FieldRef::Core(k) if k == key))
-        {
-            entry.field_order.push(FieldRef::Core(key.to_string()));
-        }
-        return;
-    }
-    // Existing extra key?
-    if let Some(pos) = entry.extra.iter().position(|(k, _)| k == key) {
-        let cur = std::mem::take(&mut entry.extra[pos].1);
-        entry.extra[pos].1 = merge(Some(cur), value, append);
-        return;
-    }
-    // New extra key.
-    let idx = entry.extra.len();
-    entry.extra.push((key.to_string(), value));
-    entry.field_order.push(FieldRef::Extra(idx));
-}
-
-fn merge(existing: Option<String>, value: String, append: bool) -> String {
-    match (existing, append) {
-        (Some(cur), true) if !cur.is_empty() => format!("{cur}; {value}"),
-        _ => value,
-    }
 }
 
 pub fn apply_move_category(store: &mut Store, id: &str, category: String) -> Result<String> {
@@ -400,14 +377,17 @@ pub fn apply_done(
         (None, Some(b)) => Resolution::done_branch(b, commit, note),
         (None, None) => bail!("done requires --pr or --branch"),
     };
-    let e = &mut store.entries[i];
-    e.resolution = Some(resolution);
-    e.status = Status::Done;
-    e.location = Location::Done;
-    // Drop blocked-on edges; the entry is resolved.
-    e.edges.retain(|edge| !matches!(edge, Edge::BlockedOn(_)));
-    rebuild_edges(e);
+    resolve(&mut store.entries[i], resolution);
     Ok(id.to_string())
+}
+
+/// Close `e` with `resolution`, which replaces its in-progress marker and its
+/// `blocked-on` field.
+fn resolve(e: &mut Entry, resolution: Resolution) {
+    e.resolution = Some(resolution);
+    e.location = Location::Done;
+    remove_extra(e, |_, k, _| k == BLOCKED_ON_KEY || k == IN_PROGRESS_KEY);
+    rebuild_edges(e);
 }
 
 fn done(
@@ -418,10 +398,22 @@ fn done(
     commit: Option<String>,
     note: Option<String>,
 ) -> Result<()> {
-    if pr.is_none() && branch.is_none() {
-        bail!("done requires --pr or --branch");
-    }
-    ensure_resolvable(paths, &[id])?;
+    let store = ensure_resolvable(paths, &[id])?;
+    // Without --pr / --branch, resolve with the PR or branch `start` recorded.
+    let (pr, branch) = match (pr, branch) {
+        (None, None) => {
+            let e = &store.entries[find(&store, id)?];
+            match (crate::parse::work_ref(e), crate::parse::in_progress_value(e)) {
+                (Some(WorkRef::Pr(p)), _) => (Some(p), None),
+                (Some(WorkRef::Branch(b)), _) => (None, Some(b)),
+                (None, Some(raw)) => {
+                    bail!("the in-progress field of {id} (`{raw}`) names no PR or branch; pass --pr or --branch")
+                }
+                (None, None) => bail!("done requires --pr or --branch, unless `mpm start` recorded one for {id}"),
+            }
+        }
+        given => given,
+    };
     crate::wal::submit(
         paths,
         crate::wal::Op::Done {
@@ -438,11 +430,7 @@ fn done(
 
 pub fn apply_wontfix(store: &mut Store, id: &str, reason: String) -> Result<String> {
     let i = find(store, id)?;
-    let e = &mut store.entries[i];
-    e.resolution = Some(Resolution::wontfix(reason));
-    e.status = Status::Wontfix;
-    e.location = Location::Done;
-    rebuild_edges(e);
+    resolve(&mut store.entries[i], Resolution::wontfix(reason));
     Ok(id.to_string())
 }
 
@@ -462,12 +450,105 @@ fn wontfix(paths: &Paths, id: &str, reason: String) -> Result<()> {
 pub fn apply_supersede(store: &mut Store, id: &str, by: &str) -> Result<String> {
     find(store, by)?; // target must exist
     let i = find(store, id)?;
+    resolve(&mut store.entries[i], Resolution::superseded(by.to_string()));
+    Ok(id.to_string())
+}
+
+pub fn apply_start(store: &mut Store, id: &str, work: WorkRef) -> Result<String> {
+    let i = find(store, id)?;
     let e = &mut store.entries[i];
-    e.resolution = Some(Resolution::superseded(by.to_string()));
-    e.status = Status::Superseded;
-    e.location = Location::Done;
+    ensure_unresolved(e)?;
+    let marker = work.to_string();
+    if WorkRef::parse(&marker) != Some(work) {
+        bail!("`{marker}` is not a valid in-progress marker");
+    }
+    e.set_field(IN_PROGRESS_KEY, marker, false);
     rebuild_edges(e);
     Ok(id.to_string())
+}
+
+/// Refuse an entry that is resolved, whether archived or still in the Open file.
+fn ensure_unresolved(e: &Entry) -> Result<()> {
+    if e.resolution.is_some() || e.location == Location::Done {
+        bail!("entry {id} is resolved; run `mpm reopen {id}` first", id = e.id);
+    }
+    Ok(())
+}
+
+fn start(paths: &Paths, id: &str, pr: Option<u32>, branch: Option<String>) -> Result<()> {
+    let work = match (pr, branch) {
+        (Some(p), None) => WorkRef::Pr(p),
+        (None, Some(b)) => {
+            WorkRef::branch(&b).with_context(|| format!("--branch `{b}` is empty or contains whitespace"))?
+        }
+        _ => bail!("start requires exactly one of --pr or --branch"),
+    };
+    let store = ensure_resolvable(paths, &[id])?;
+    ensure_unresolved(&store.entries[find(&store, id)?])?;
+    crate::wal::submit(
+        paths,
+        crate::wal::Op::Start {
+            id: id.to_string(),
+            work,
+        },
+    )?;
+    println!("{id}");
+    Ok(())
+}
+
+pub fn apply_stop(store: &mut Store, id: &str) -> Result<String> {
+    let i = find(store, id)?;
+    let e = &mut store.entries[i];
+    if !remove_extra(e, |_, k, _| k == IN_PROGRESS_KEY) {
+        bail!("entry {id} is not in progress");
+    }
+    rebuild_edges(e);
+    Ok(id.to_string())
+}
+
+fn stop(paths: &Paths, id: &str) -> Result<()> {
+    let store = ensure_resolvable(paths, &[id])?;
+    if crate::parse::in_progress_value(&store.entries[find(&store, id)?]).is_none() {
+        bail!("entry {id} is not in progress");
+    }
+    crate::wal::submit(paths, crate::wal::Op::Stop { id: id.to_string() })?;
+    println!("{id}");
+    Ok(())
+}
+
+/// Remove every non-core field that `drop(index, key, value)` selects (a hand edit can
+/// repeat a key) and re-point the `FieldRef::Extra` indices. Returns whether
+/// any was removed.
+fn remove_extra(entry: &mut Entry, drop: impl Fn(usize, &str, &str) -> bool) -> bool {
+    let mut kept = 0;
+    let new_index: Vec<Option<usize>> = entry
+        .extra
+        .iter()
+        .enumerate()
+        .map(|(i, (k, v))| {
+            (!drop(i, k, v)).then(|| {
+                kept += 1;
+                kept - 1
+            })
+        })
+        .collect();
+    if kept == new_index.len() {
+        return false;
+    }
+    let mut keep = new_index.iter().map(Option::is_some);
+    entry.extra.retain(|_| keep.next().unwrap_or(true));
+    entry.field_order.retain_mut(|f| match f {
+        FieldRef::Extra(i) => match new_index.get(*i) {
+            Some(Some(n)) => {
+                *i = *n;
+                true
+            }
+            Some(None) => false,
+            None => true,
+        },
+        _ => true,
+    });
+    true
 }
 
 fn supersede(paths: &Paths, id: &str, by: &str) -> Result<()> {
@@ -486,17 +567,21 @@ fn supersede(paths: &Paths, id: &str, by: &str) -> Result<()> {
 pub fn apply_block(store: &mut Store, id: &str, on: &str) -> Result<String> {
     let i = find(store, id)?;
     let e = &mut store.entries[i];
-    if !e.edges.iter().any(|edge| matches!(edge, Edge::BlockedOn(t) if t == on)) {
-        e.edges.push(Edge::BlockedOn(on.to_string()));
-    }
-    if e.status == Status::Open {
-        e.status = Status::Blocked;
+    // Decide from the field, not the edges: an edge the body derives goes away
+    // when the body text changes, and the explicit block must not.
+    if !crate::parse::list_field_ids(e, BLOCKED_ON_KEY).contains(&on) {
+        e.set_field(BLOCKED_ON_KEY, on.to_string(), true);
+        rebuild_edges(e);
     }
     Ok(id.to_string())
 }
 
 fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
-    ensure_resolvable(paths, &[id, on])?;
+    // `apply_block` never looks `on` up, so a duplicated `on` id is not a no-op.
+    let store = ensure_resolvable(paths, &[id])?;
+    if let Some(missing) = first_missing(&store, &[on]) {
+        bail!("no entry with id {missing}");
+    }
     crate::wal::submit(
         paths,
         crate::wal::Op::Block {
@@ -511,6 +596,10 @@ fn block(paths: &Paths, id: &str, on: &str) -> Result<()> {
 pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<String> {
     let i = find(store, id)?;
     let e = &mut store.entries[i];
+    drop_blocked_on(e, on);
+    rebuild_edges(e);
+    // A `blocked: FU-x` in next-action has no field to edit, so its edge is
+    // dropped in memory only and comes back on the next re-derive.
     e.edges.retain(|edge| match (edge, on) {
         (Edge::BlockedOn(t), Some(target)) => t != target,
         (Edge::BlockedOn(_), None) => false,
@@ -520,6 +609,28 @@ pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<St
         e.status = Status::Open;
     }
     Ok(id.to_string())
+}
+
+/// Drop `on` (every id when `None`) from each `blocked-on` field. Other items
+/// keep their text, and a field keeps its place unless it ends up empty.
+fn drop_blocked_on(e: &mut Entry, on: Option<&str>) {
+    let mut emptied = Vec::new();
+    if let Some(target) = on {
+        for (i, (k, v)) in e.extra.iter_mut().enumerate() {
+            if k != BLOCKED_ON_KEY {
+                continue;
+            }
+            if let Some(kept) = crate::parse::remove_list_item(v, target) {
+                if kept.is_empty() {
+                    emptied.push(i);
+                }
+                *v = kept;
+            }
+        }
+    }
+    remove_extra(e, |i, k, _| {
+        k == BLOCKED_ON_KEY && (on.is_none() || emptied.contains(&i))
+    });
 }
 
 fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {
@@ -556,8 +667,9 @@ pub fn apply_link(store: &mut Store, from: &str, to: &str) -> Result<String> {
     find(store, to)?;
     let i = find(store, from)?;
     let e = &mut store.entries[i];
-    if !e.edges.iter().any(|edge| matches!(edge, Edge::LinksTo(t) if t == to)) {
-        e.edges.push(Edge::LinksTo(to.to_string()));
+    if !crate::parse::list_field_ids(e, LINKS_TO_KEY).contains(&to) {
+        e.set_field(LINKS_TO_KEY, format!("[[{to}]]"), true);
+        rebuild_edges(e);
     }
     Ok(from.to_string())
 }
@@ -784,12 +896,13 @@ fn parse_status(s: &str) -> Result<Status> {
         "wontfix" => Status::Wontfix,
         "blocked" => Status::Blocked,
         "superseded" => Status::Superseded,
+        "in-progress" => Status::InProgress,
         other => bail!("unknown status `{other}`"),
     })
 }
 
-/// Recompute body-derived edges (wikilinks, blocked-on, surfaced/carried) after
-/// a field or resolution mutation, preserving manually-added link/block edges.
+/// Recompute every edge and the status from the entry's fields after a field
+/// or resolution mutation.
 fn rebuild_edges(entry: &mut Entry) {
     crate::parse::rebuild_entry_edges(entry);
 }
