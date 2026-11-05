@@ -478,3 +478,52 @@ fn test_set_on_an_aliased_core_field_keeps_one_line() {
         .collect();
     assert_eq!(scope_lines, vec!["- **original-scope**: rewritten".to_string()]);
 }
+
+#[test]
+fn test_unblock_on_an_unlisted_id_keeps_an_empty_field() {
+    let p = seed("unblock_empty");
+    hand_add_line(&p, A, "- **blocked-on**:");
+    let _ = fs::remove_file(&p.cache);
+    // One unrelated write renders the hand edit in canonical form.
+    set(&p, C, "scope", "normalize", false);
+    let before = section(&p, A);
+    assert!(before.iter().any(|l| l.trim_end() == "- **blocked-on**:"));
+    unblock(&p, A, Some(B));
+    assert_eq!(section(&p, A), before);
+}
+
+#[test]
+fn test_unblock_of_the_first_item_keeps_the_rest_verbatim() {
+    let p = seed("unblock_tail");
+    set(&p, A, "blocked-on", &format!("{B}; wait for API,"), false);
+    unblock(&p, A, Some(B));
+    assert!(open_md(&p).contains("- **blocked-on**: wait for API,"));
+}
+
+#[test]
+fn test_unblock_of_the_last_item_drops_its_separator() {
+    let p = seed("unblock_last");
+    set(&p, A, "blocked-on", &format!("{C}; {B}"), false);
+    unblock(&p, A, Some(B));
+    assert!(open_md(&p).contains(&format!("- **blocked-on**: {C}\n")));
+}
+
+#[test]
+fn test_schema_1_upgrade_and_reimport_agree_on_a_done_file_entry_with_no_resolution() {
+    const DDD: &str = "FU-2026-01-01-ddd";
+    let p = seed_legacy_014("legacy_done");
+    let done = format!(
+        "{}\n## Parser\n\n### {DDD}  ·  surfaced in PR #4\n- **next-action**: blocked: FU-2026-01-01-bbb\n",
+        fs::read_to_string(&p.done_md).unwrap()
+    );
+    fs::write(&p.done_md, done).unwrap();
+    let _ = fs::remove_file(&p.cache);
+    set(&p, "FU-2026-01-01-bbb", "scope", "write the cache", false);
+    // 0.1.4 cached such an entry as Blocked.
+    let mut s: Store = rmp_serde::from_slice(&fs::read(&p.cache).unwrap()).unwrap();
+    s.schema_version = FIELDLESS_EDGES_VERSION;
+    s.entries.iter_mut().find(|e| e.id == DDD).unwrap().status = Status::Blocked;
+    fs::write(&p.cache, rmp_serde::to_vec_named(&s).unwrap()).unwrap();
+    assert_eq!(load(&p, DDD).status, Status::Done);
+    assert_eq!(reimport(&p, DDD).status, Status::Done);
+}

@@ -386,7 +386,7 @@ pub fn apply_done(
 fn resolve(e: &mut Entry, resolution: Resolution) {
     e.resolution = Some(resolution);
     e.location = Location::Done;
-    remove_extra(e, |k, _| k == BLOCKED_ON_KEY || k == IN_PROGRESS_KEY);
+    remove_extra(e, |_, k, _| k == BLOCKED_ON_KEY || k == IN_PROGRESS_KEY);
     rebuild_edges(e);
 }
 
@@ -499,7 +499,7 @@ fn start(paths: &Paths, id: &str, pr: Option<u32>, branch: Option<String>) -> Re
 pub fn apply_stop(store: &mut Store, id: &str) -> Result<String> {
     let i = find(store, id)?;
     let e = &mut store.entries[i];
-    if !remove_extra(e, |k, _| k == IN_PROGRESS_KEY) {
+    if !remove_extra(e, |_, k, _| k == IN_PROGRESS_KEY) {
         bail!("entry {id} is not in progress");
     }
     rebuild_edges(e);
@@ -516,16 +516,17 @@ fn stop(paths: &Paths, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove every non-core field that `drop(key, value)` selects (a hand edit can
+/// Remove every non-core field that `drop(index, key, value)` selects (a hand edit can
 /// repeat a key) and re-point the `FieldRef::Extra` indices. Returns whether
 /// any was removed.
-fn remove_extra(entry: &mut Entry, drop: impl Fn(&str, &str) -> bool) -> bool {
+fn remove_extra(entry: &mut Entry, drop: impl Fn(usize, &str, &str) -> bool) -> bool {
     let mut kept = 0;
     let new_index: Vec<Option<usize>> = entry
         .extra
         .iter()
-        .map(|(k, v)| {
-            (!drop(k, v)).then(|| {
+        .enumerate()
+        .map(|(i, (k, v))| {
+            (!drop(i, k, v)).then(|| {
                 kept += 1;
                 kept - 1
             })
@@ -613,14 +614,23 @@ pub fn apply_unblock(store: &mut Store, id: &str, on: Option<&str>) -> Result<St
 /// Drop `on` (every id when `None`) from each `blocked-on` field. Other items
 /// keep their text, and a field keeps its place unless it ends up empty.
 fn drop_blocked_on(e: &mut Entry, on: Option<&str>) {
+    let mut emptied = Vec::new();
     if let Some(target) = on {
-        for (_, v) in e.extra.iter_mut().filter(|(k, _)| k == BLOCKED_ON_KEY) {
+        for (i, (k, v)) in e.extra.iter_mut().enumerate() {
+            if k != BLOCKED_ON_KEY {
+                continue;
+            }
             if let Some(kept) = crate::parse::remove_list_item(v, target) {
+                if kept.is_empty() {
+                    emptied.push(i);
+                }
                 *v = kept;
             }
         }
     }
-    remove_extra(e, |k, v| k == BLOCKED_ON_KEY && (on.is_none() || v.is_empty()));
+    remove_extra(e, |i, k, _| {
+        k == BLOCKED_ON_KEY && (on.is_none() || emptied.contains(&i))
+    });
 }
 
 fn unblock(paths: &Paths, id: &str, on: Option<&str>) -> Result<()> {

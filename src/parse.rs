@@ -394,8 +394,15 @@ pub fn remove_list_item(value: &str, id: &str) -> Option<String> {
     if !items.iter().any(is_target) {
         return None;
     }
+    let last_removed = items.last().is_some_and(is_target);
     let kept: String = items.into_iter().filter(|item| !is_target(item)).collect();
-    Some(kept.trim().trim_end_matches(LIST_SEPARATORS).trim_end().to_string())
+    let kept = kept.trim();
+    // Removing the last item leaves the separator that preceded it.
+    let kept = match last_removed {
+        true => kept.strip_suffix(LIST_SEPARATORS).unwrap_or(kept).trim_end(),
+        false => kept,
+    };
+    Some(kept.to_string())
 }
 
 fn owned_ids(entry: &Entry, key: &str) -> Vec<String> {
@@ -478,7 +485,9 @@ fn set_status_from_resolution(entry: &mut Entry) {
             ResKind::Wontfix => Status::Wontfix,
             ResKind::Superseded => Status::Superseded,
         };
-    } else if entry.location == Location::Open {
+    } else if entry.location == Location::Done {
+        entry.status = Status::Done;
+    } else {
         entry.status = if in_progress_value(entry).is_some() {
             Status::InProgress
         } else if entry.edges.iter().any(|e| matches!(e, Edge::BlockedOn(_))) {
